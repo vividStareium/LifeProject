@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Production and debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files
+.env
+.env*.local
+!.env.local.example
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# TypeScript / framework cache
+tsconfig.tsbuildinfo
+
+# Local deployment state
+.vercel/
+
+# Local database connection notes and secrets
+Document/host.txt
+Document/user.txt
+Document/password.txt
+Document/port.txt
+Document/database.txt
