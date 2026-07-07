@@ -284,7 +284,7 @@ export const metricValue = (summary: DailySummary, metric: HeatmapMetric) => {
   }
 };
 
-const periodKey = (date: string, period: PeriodSize) => {
+export const periodKey = (date: string, period: PeriodSize) => {
   const parsed = parseDateInput(date);
   if (!parsed) {
     return date;

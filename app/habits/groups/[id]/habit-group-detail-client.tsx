@@ -6,9 +6,10 @@ import { useRouter } from 'next/navigation';
 import type { User } from '@supabase/supabase-js';
 
 import { AppShell, Panel, StatCard } from '@/components/app-shell';
-import { periodLabel, type PeriodSize } from '@/lib/analytics';
-import { getBeijingDateInput, parseDateInput, shiftDateInput } from '@/lib/date';
+import { periodKey, periodLabel, type PeriodSize } from '@/lib/analytics';
+import { getBeijingDateInput, shiftDateInput } from '@/lib/date';
 import { completionHeatmapStyle } from '@/lib/heatmap-color';
+import { habitDailyRecordSelectFields, habitTemplateSelectFields } from '@/lib/habit-db';
 import {
   buildHabitScoreSeries,
   evaluateHabitRecord,
@@ -33,24 +34,6 @@ type GroupPoint = {
 };
 
 const periodOptions: PeriodSize[] = ['day', 'week', 'month', 'quarter', 'half_year', 'year'];
-
-const detailPeriodKey = (date: string, period: PeriodSize) => {
-  const parsed = parseDateInput(date);
-  if (!parsed) return date;
-  const year = parsed.getUTCFullYear();
-  const month = parsed.getUTCMonth() + 1;
-  if (period === 'day') return date;
-  if (period === 'week') {
-    const weekStart = new Date(parsed);
-    const day = weekStart.getUTCDay();
-    weekStart.setUTCDate(weekStart.getUTCDate() - (day === 0 ? 6 : day - 1));
-    return weekStart.toISOString().slice(0, 10);
-  }
-  if (period === 'month') return `${year}-${String(month).padStart(2, '0')}`;
-  if (period === 'quarter') return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
-  if (period === 'half_year') return `${year}-H${month <= 6 ? 1 : 2}`;
-  return String(year);
-};
 
 const recentRange = () => {
   const endInput = getBeijingDateInput();
@@ -144,17 +127,13 @@ export default function HabitGroupDetailClient({ groupId }: HabitGroupDetailClie
         .order('created_at', { ascending: true }),
       supabase
         .from('habit_templates')
-        .select(
-          'id,user_id,group_id,source_key,source_name,source_type,title,description,question,frequency_kind,frequency_rule,unit,target_type,target_value,color,sort_order,archived_at,created_at,updated_at'
-        )
+        .select(habitTemplateSelectFields)
         .eq('user_id', currentUser.id)
         .order('sort_order', { ascending: true })
         .order('created_at', { ascending: true }),
       supabase
         .from('habit_daily_records')
-        .select(
-          'id,user_id,template_id,record_date,value_text,value_number,completion_state,notes,source_type,source_key,raw_payload,created_at,updated_at'
-        )
+        .select(habitDailyRecordSelectFields)
         .eq('user_id', currentUser.id)
         .gte('record_date', startInput)
         .order('record_date', { ascending: false })
@@ -174,8 +153,8 @@ export default function HabitGroupDetailClient({ groupId }: HabitGroupDetailClie
 
     setGroup(groupResult.data as unknown as HabitGroupRow);
     setGroups((groupsResult.data ?? []) as unknown as HabitGroupRow[]);
-    setTemplates((templateResult.data ?? []).map((row) => normalizeHabitTemplateRow(row as Record<string, unknown>)));
-    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as Record<string, unknown>)));
+    setTemplates((templateResult.data ?? []).map((row) => normalizeHabitTemplateRow(row as unknown as Record<string, unknown>)));
+    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as unknown as Record<string, unknown>)));
     setLoading(false);
   };
 
@@ -286,7 +265,7 @@ export default function HabitGroupDetailClient({ groupId }: HabitGroupDetailClie
     const map = new Map<string, GroupPoint[]>();
 
     for (const item of timeline) {
-      const key = detailPeriodKey(item.date, period);
+      const key = periodKey(item.date, period);
       const list = map.get(key) ?? [];
       list.push(item);
       map.set(key, list);

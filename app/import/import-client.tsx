@@ -11,10 +11,6 @@ import type { HabitImportJobRow } from '@/types/habit';
 import type { ImportPreview } from '@/types/import';
 
 const kindLabels: Record<string, string> = {
-  loop_habits_templates: 'Loop 模板',
-  loop_habits_matrix_checkmarks: 'Loop 打卡矩阵',
-  loop_habits_matrix_scores: 'Loop 分数矩阵',
-  loop_habits_record_rows: 'Loop 明细行',
   tasks: '任务',
   habit_templates: '习惯模板',
   habit_records: '习惯记录',
@@ -206,7 +202,7 @@ export default function ImportClient() {
       <div className='grid gap-4 xl:grid-cols-[1fr_0.85fr]'>
         <Panel
           title='上传文件'
-          description='支持单个 CSV 或包含 Habits / Checkmarks / Scores 的 ZIP。'
+          description='支持单个 CSV，或包含 tasks.csv、habit-templates.csv、habit-records.csv 的 ZIP。'
           actions={
             <label className='cursor-pointer rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800'>
               选择文件
@@ -220,11 +216,11 @@ export default function ImportClient() {
           }
         >
           <div className='rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-5 text-sm text-slate-600'>
-            <p className='font-medium text-slate-900'>推荐导入顺序</p>
+            <p className='font-medium text-slate-900'>支持的 CSV</p>
             <ol className='mt-2 list-decimal space-y-1 pl-5'>
-              <li>先导入 `Habits.csv`，建立模板。</li>
-              <li>再导入 `Checkmarks.csv` / `Scores.csv` 或子目录明细。</li>
-              <li>如果是我们的导出包，直接上传 ZIP 即可回放。</li>
+              <li>`habit-templates.csv`：习惯模板，含起始日期、频率和目标。</li>
+              <li>`habit-records.csv`：每日记录，通过 `template_source_key` 匹配模板。</li>
+              <li>`tasks.csv`：一次性任务。导出 ZIP 可直接再次导入。</li>
             </ol>
           </div>
 
@@ -298,24 +294,9 @@ export default function ImportClient() {
                   {preview.files.map((file) => (
                     <div key={`${file.path}-mapping`} className='rounded-2xl bg-slate-50 p-3 text-sm text-slate-600'>
                       <p className='font-medium text-slate-900'>{file.name}</p>
-                      {file.kind === 'loop_habits_templates' && (
+                      {file.kind === 'habit_templates' && (
                         <p className='mt-1'>
-                          {'Position -> source_key, Name -> title, Type -> frequency_kind, FrequencyNumerator / Denominator -> frequency_rule'}
-                        </p>
-                      )}
-                      {file.kind === 'loop_habits_matrix_checkmarks' && (
-                        <p className='mt-1'>
-                          {'Date -> record_date, 每个习惯列按标题自动匹配模板，值写入 value_text / completion_state'}
-                        </p>
-                      )}
-                      {file.kind === 'loop_habits_matrix_scores' && (
-                        <p className='mt-1'>
-                          {'Date -> record_date, 每个习惯列按标题自动匹配模板，值写入 value_number'}
-                        </p>
-                      )}
-                      {file.kind === 'loop_habits_record_rows' && (
-                        <p className='mt-1'>
-                          {'Date -> record_date, Value / Score -> value_text / value_number, Notes -> notes'}
+                          {'source_key / title / frequency_rule / target_value / start_date 会写入习惯模板表。'}
                         </p>
                       )}
                       {file.kind === 'tasks' && (

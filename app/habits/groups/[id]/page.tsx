@@ -1,11 +1,13 @@
 import HabitGroupDetailClient from './habit-group-detail-client';
 
 type HabitGroupDetailPageProps = {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 };
 
-export default function HabitGroupDetailPage({ params }: HabitGroupDetailPageProps) {
-  return <HabitGroupDetailClient groupId={params.id} />;
+export default async function HabitGroupDetailPage({ params }: HabitGroupDetailPageProps) {
+  const { id } = await params;
+
+  return <HabitGroupDetailClient groupId={id} />;
 }

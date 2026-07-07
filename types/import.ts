@@ -14,10 +14,6 @@ export type ParsedCsvFile = {
 };
 
 export type ImportFileKind =
-  | 'loop_habits_templates'
-  | 'loop_habits_matrix_checkmarks'
-  | 'loop_habits_matrix_scores'
-  | 'loop_habits_record_rows'
   | 'tasks'
   | 'habit_templates'
   | 'habit_records'
@@ -37,6 +33,7 @@ export type HabitTemplateDraft = {
   targetType: string | null;
   targetValue: number | null;
   color: string | null;
+  startDate: string | null;
   archivedAt: string | null;
 };
 
@@ -60,6 +57,11 @@ export type TaskDraft = {
   title: string;
   description: string | null;
   taskDate: string;
+  taskType: 'single' | 'range';
+  rangeStartDate: string | null;
+  rangeEndDate: string | null;
+  progressValue: number | null;
+  targetValue: number | null;
   startTime: string | null;
   endTime: string | null;
   priority: 'low' | 'medium' | 'high';

@@ -6,9 +6,10 @@ import { useRouter } from 'next/navigation';
 import type { User } from '@supabase/supabase-js';
 
 import { AppShell, Panel, StatCard } from '@/components/app-shell';
-import { getBeijingDateInput, parseDateInput, shiftDateInput } from '@/lib/date';
-import { periodLabel, type PeriodSize } from '@/lib/analytics';
+import { getBeijingDateInput } from '@/lib/date';
+import { periodKey, periodLabel, type PeriodSize } from '@/lib/analytics';
 import { completionHeatmapStyle } from '@/lib/heatmap-color';
+import { habitDailyRecordSelectFields, habitTemplateSelectFields } from '@/lib/habit-db';
 import {
   buildHabitScoreSeries,
   formatHabitValue,
@@ -22,31 +23,6 @@ type HabitDetailClientProps = {
   habitId: string;
 };
 const periodOptions: PeriodSize[] = ['day', 'week', 'month', 'quarter', 'half_year', 'year'];
-
-const detailPeriodKey = (date: string, period: PeriodSize) => {
-  const parsed = parseDateInput(date);
-  if (!parsed) return date;
-  const year = parsed.getUTCFullYear();
-  const month = parsed.getUTCMonth() + 1;
-  if (period === 'day') return date;
-  if (period === 'week') {
-    const weekStart = new Date(parsed);
-    const day = weekStart.getUTCDay();
-    weekStart.setUTCDate(weekStart.getUTCDate() - (day === 0 ? 6 : day - 1));
-    return weekStart.toISOString().slice(0, 10);
-  }
-  if (period === 'month') return `${year}-${String(month).padStart(2, '0')}`;
-  if (period === 'quarter') return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
-  if (period === 'half_year') return `${year}-H${month <= 6 ? 1 : 2}`;
-  return String(year);
-};
-
-const recentRange = () => {
-  const end = parseDateInput(getBeijingDateInput()) ?? new Date();
-  const startInput = shiftDateInput(getBeijingDateInput(), -180);
-  const start = parseDateInput(startInput) ?? end;
-  return { start, end, startInput };
-};
 
 type TrendLineProps = {
   title: string;
@@ -92,6 +68,47 @@ function TrendLine({ title, values, maxValue, strokeClassName, suffix = '' }: Tr
   );
 }
 
+type ValueBarChartProps = {
+  values: Array<{ date: string; value: number }>;
+  unit?: string | null;
+};
+
+function ValueBarChart({ values, unit }: ValueBarChartProps) {
+  const maxValue = Math.max(1, ...values.map((item) => Math.max(0, item.value)));
+  const latest = values.at(-1);
+
+  return (
+    <div>
+      <div className='mb-3 flex items-center justify-between gap-3 text-sm'>
+        <p className='font-medium text-slate-900'>实际值统计</p>
+        {latest && (
+          <p className='text-slate-500'>
+            {latest.date}：{formatHabitValue(latest.value)}
+            {unit ? ` ${unit}` : ''}
+          </p>
+        )}
+      </div>
+      <div className='overflow-x-auto rounded-2xl border border-slate-100 bg-slate-50 p-3'>
+        <div className='flex h-56 min-w-[720px] items-end gap-1'>
+          {values.map((item) => {
+            const height = Math.max(2, (Math.max(0, item.value) / maxValue) * 100);
+            return (
+              <div key={item.date} className='flex min-w-4 flex-1 flex-col items-center justify-end gap-2'>
+                <div
+                  title={`${item.date}：${formatHabitValue(item.value)}${unit ? ` ${unit}` : ''}`}
+                  className='w-full rounded-t bg-sky-500 transition hover:bg-sky-600'
+                  style={{ height: `${height}%` }}
+                />
+                <span className='max-w-14 truncate text-[10px] text-slate-500'>{item.date}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
@@ -116,27 +133,13 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
     }
 
     setUser(currentUser);
-    const { startInput } = recentRange();
 
-    const [templateResult, recordResult] = await Promise.all([
-      supabase
-        .from('habit_templates')
-        .select(
-          'id,user_id,source_key,source_name,source_type,title,description,question,frequency_kind,frequency_rule,unit,target_type,target_value,color,sort_order,archived_at,created_at,updated_at'
-        )
-        .eq('user_id', currentUser.id)
-        .eq('id', habitId)
-        .single(),
-      supabase
-        .from('habit_daily_records')
-        .select(
-          'id,user_id,template_id,record_date,value_text,value_number,completion_state,notes,source_type,source_key,raw_payload,created_at,updated_at'
-        )
-        .eq('user_id', currentUser.id)
-        .eq('template_id', habitId)
-        .gte('record_date', startInput)
-        .order('record_date', { ascending: false })
-    ]);
+    const templateResult = await supabase
+      .from('habit_templates')
+      .select(habitTemplateSelectFields)
+      .eq('user_id', currentUser.id)
+      .eq('id', habitId)
+      .single();
 
     if (templateResult.error) {
       setError('未找到这个习惯，或当前账号没有访问权限。');
@@ -144,14 +147,23 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
       return;
     }
 
+    const loadedTemplate = normalizeHabitTemplateRow(templateResult.data as unknown as Record<string, unknown>);
+    const recordResult = await supabase
+      .from('habit_daily_records')
+      .select(habitDailyRecordSelectFields)
+      .eq('user_id', currentUser.id)
+      .eq('template_id', habitId)
+      .gte('record_date', loadedTemplate.start_date)
+      .order('record_date', { ascending: false });
+
     if (recordResult.error) {
       setError('读取习惯记录失败。');
       setLoading(false);
       return;
     }
 
-    setTemplate(normalizeHabitTemplateRow(templateResult.data as Record<string, unknown>));
-    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as Record<string, unknown>)));
+    setTemplate(loadedTemplate);
+    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as unknown as Record<string, unknown>)));
     setLoading(false);
   };
 
@@ -164,26 +176,58 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
       return [];
     }
 
-    const { startInput } = recentRange();
-    return buildHabitScoreSeries(template, records, startInput, getBeijingDateInput());
+    return buildHabitScoreSeries(template, records, template.start_date, getBeijingDateInput());
   }, [records, template]);
 
   const stats = useMemo(() => {
-    const doneDays = timeline.filter((item) => item.evaluation.isDone).length;
-    const ratioAvg = timeline.length
-      ? timeline.reduce((sum, item) => sum + item.evaluation.completionRatio, 0) / timeline.length
+    const dueTimeline = timeline.filter((item) => item.isDue);
+    const doneDays = dueTimeline.filter((item) => item.evaluation.isDone).length;
+    const ratioAvg = dueTimeline.length
+      ? dueTimeline.reduce((sum, item) => sum + item.evaluation.completionRatio, 0) / dueTimeline.length
       : 0;
+    let longestStreak = 0;
+    let runningStreak = 0;
+
+    for (const item of timeline) {
+      if (!item.isDue) {
+        continue;
+      }
+
+      if (item.evaluation.isDone) {
+        runningStreak += 1;
+        longestStreak = Math.max(longestStreak, runningStreak);
+      } else {
+        runningStreak = 0;
+      }
+    }
+
+    let currentStreak = 0;
+    for (const item of [...timeline].reverse()) {
+      if (!item.isDue) {
+        continue;
+      }
+
+      if (!item.evaluation.isDone) {
+        break;
+      }
+
+      currentStreak += 1;
+    }
 
     return {
       doneDays,
-      ratioAvg: Math.round(ratioAvg * 1000) / 1000
+      dueDays: dueTimeline.length,
+      ratioAvg: Math.round(ratioAvg * 1000) / 1000,
+      longestStreak,
+      currentStreak
     };
   }, [timeline]);
+
   const periodTimeline = useMemo(() => {
     const map = new Map<string, typeof timeline>();
 
     for (const item of timeline) {
-      const key = detailPeriodKey(item.date, period);
+      const key = periodKey(item.date, period);
       const list = map.get(key) ?? [];
       list.push(item);
       map.set(key, list);
@@ -191,12 +235,19 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
 
     return Array.from(map.entries()).map(([key, list]) => {
       const sorted = [...list].sort((left, right) => left.date.localeCompare(right.date));
+      const dueItems = sorted.filter((item) => item.isDue);
       return {
         key,
         label: key,
-        completionRatio:
-          sorted.reduce((sum, item) => sum + item.evaluation.completionRatio, 0) / sorted.length,
-        score: sorted.at(-1)?.score ?? 0
+        completionRatio: dueItems.length
+          ? dueItems.reduce((sum, item) => sum + item.evaluation.completionRatio, 0) / dueItems.length
+          : 0,
+        actualValue: period === 'day'
+          ? sorted.at(-1)?.evaluation.actualValue ?? 0
+          : sorted.reduce((sum, item) => sum + item.evaluation.actualValue, 0),
+        score: sorted.at(-1)?.score ?? 0,
+        dueCount: dueItems.length,
+        doneCount: dueItems.filter((item) => item.evaluation.isDone).length
       };
     }).sort((left, right) => left.key.localeCompare(right.key));
   }, [period, timeline]);
@@ -293,9 +344,11 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
 
       {template && (
         <>
-          <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
-            <StatCard label='完成天数' value={stats.doneDays} hint='最近 181 天' />
+          <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-5'>
+            <StatCard label='完成天数' value={stats.doneDays} hint={`应完成 ${stats.dueDays} 天`} />
             <StatCard label='平均完成度' value={stats.ratioAvg} />
+            <StatCard label='当前连续完成' value={stats.currentStreak} hint='按应完成日统计' />
+            <StatCard label='最长连续完成' value={stats.longestStreak} hint='按应完成日统计' />
             <StatCard label='目标' value={template.target_value ?? '无'} hint={targetTypeLabel(template.target_type)} />
           </div>
 
@@ -304,6 +357,7 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
               <p>问题：{template.question ?? '未填写'}</p>
               <p>单位：{template.unit ?? '未填写'}</p>
               <p>目标类型：{targetTypeLabel(template.target_type)}</p>
+              <p>起始日期：{template.start_date}</p>
               <p>状态：{template.archived_at ? '已归档' : '活跃'}</p>
               <p className='md:col-span-2'>说明：{template.description ?? '未填写'}</p>
             </div>
@@ -339,7 +393,9 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
                       {period !== 'day' && (
                         <>
                           <span className='block font-semibold'>{item.label}</span>
-                          <span className='text-xs'>完成度 {Math.round(ratio * 100)}%</span>
+                          <span className='text-xs'>
+                            完成度 {Math.round(ratio * 100)}% · {item.doneCount}/{item.dueCount}
+                          </span>
                         </>
                       )}
                     </div>
@@ -350,9 +406,19 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
           </Panel>
 
           <div className='grid gap-4 xl:grid-cols-2'>
+            <Panel title='实际值柱状图' description={period === 'day' ? '每根柱代表当天记录的实际值。' : '每根柱代表该时间区间内实际值合计。'}>
+              <ValueBarChart
+                values={periodTimeline.map((item) => ({
+                  date: item.label,
+                  value: item.actualValue
+                }))}
+                unit={template.unit}
+              />
+            </Panel>
+
             <Panel title='完成度趋势'>
               <TrendLine
-                title='最近 181 天完成度'
+                title='完成度'
                 values={periodTimeline.map((item) => ({
                   date: item.label,
                   value: item.completionRatio

@@ -3,32 +3,22 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { buildDailySummaries, buildHeatmapWeeks } from '@/lib/analytics';
 import {
-  stringifyCsv,
-  stringifyCsvObjects,
-  parseCsv,
   normalizeHeader,
+  parseCsv,
   parseNumberMaybe,
   safeTrim,
-  slugify
+  stringifyCsvObjects
 } from '@/lib/csv';
+import { getBeijingDateInput } from '@/lib/date';
+import { isSchemaError } from '@/lib/habit-db';
 import {
-  addMonths,
-  eachDayOfRange,
-  startOfDay,
-  toDateInputValue
-} from '@/lib/date';
-import {
-  buildHabitTemplateDraft,
   buildHabitScoreSeries,
   createRecordSourceKey,
   evaluateHabitRecord,
-  isYesNoHabit,
-  mergeRecordDraft,
-  normalizeCompletionState,
-  normalizeScaledNumber,
-  resolveTemplateByName
+  normalizeCompletionState
 } from '@/lib/habit-domain';
 import type {
+  FrequencyKind,
   HabitDailyRecordRow,
   HabitImportJobItemRow,
   HabitImportJobRow,
@@ -75,55 +65,13 @@ type JsonValue =
 
 const validTaskStatuses = new Set(['todo', 'done', 'cancelled']);
 const validPriorities = new Set(['low', 'medium', 'high']);
-const yesValues = new Set(['YES', 'YES_MANUAL', 'TRUE', 'DONE', 'DONE_MANUAL', 'COMPLETED', '1']);
-const noValues = new Set(['NO', 'FALSE', 'MISSED', '0']);
+const validSourceTypes = new Set(['manual', 'csv', 'zip', 'export']);
+const validFrequencyKinds = new Set(['daily', 'weekly', 'custom']);
 
 const splitPath = (path: string) => path.replace(/\\/g, '/').split('/').filter(Boolean);
-
 const basename = (path: string) => splitPath(path).at(-1) ?? path;
-
-const parentName = (path: string) => {
-  const parts = splitPath(path);
-  if (parts.length <= 1) {
-    return '';
-  }
-
-  return parts[parts.length - 2] ?? '';
-};
-
 const normalizeText = (value: string) => value.trim().toLowerCase();
-
-const toObjectRow = (headers: string[], row: string[]) => {
-  const result: CsvRowObject = {};
-
-  headers.forEach((header, index) => {
-    const key = normalizeHeader(header);
-    if (!key) {
-      return;
-    }
-
-    result[key] = row[index] ?? '';
-  });
-
-  return result;
-};
-
-const getRowValue = (row: CsvRowObject, candidates: string[]) => {
-  for (const candidate of candidates) {
-    const key = Object.keys(row).find((entry) => normalizeText(entry) === normalizeText(candidate));
-    if (key) {
-      const value = row[key];
-      if (value !== undefined) {
-        return value;
-      }
-    }
-  }
-
-  return '';
-};
-
 const isDateCell = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
-
 const unique = <T,>(values: T[]) => Array.from(new Set(values));
 
 const chunkArray = <T,>(values: T[], size: number) => {
@@ -136,171 +84,116 @@ const chunkArray = <T,>(values: T[], size: number) => {
   return chunks;
 };
 
+const toObjectRow = (headers: string[], row: string[]) => {
+  const result: CsvRowObject = {};
+
+  headers.forEach((header, index) => {
+    const key = normalizeHeader(header);
+    if (key) {
+      result[key] = row[index] ?? '';
+    }
+  });
+
+  return result;
+};
+
+const getRowValue = (row: CsvRowObject, candidates: string[]) => {
+  for (const candidate of candidates) {
+    const key = Object.keys(row).find((entry) => normalizeText(entry) === normalizeText(candidate));
+    if (key) {
+      return row[key] ?? '';
+    }
+  }
+
+  return '';
+};
+
 const inferSourceType = (fileName: string): HabitSourceType => {
   const lower = fileName.toLowerCase();
-  if (lower.endsWith('.zip')) {
-    return 'zip';
-  }
-
-  if (lower.endsWith('.csv')) {
-    return 'csv';
-  }
-
+  if (lower.endsWith('.zip')) return 'zip';
+  if (lower.endsWith('.csv')) return 'csv';
   return 'manual';
 };
 
-const createPlaceholderTemplate = (
-  sourceKey: string,
-  title: string,
-  sourceName: string | null,
-  sourceType: HabitSourceType,
-  sortOrder: number
-): HabitTemplateDraft => ({
-  sourceKey,
-  sourceName,
-  sourceType,
-  sortOrder,
-  title,
-  description: null,
-  question: null,
-  frequencyKind: 'daily',
-  frequencyRule: { inferred: true },
-  unit: null,
-  targetType: null,
-  targetValue: null,
-  color: null,
-  archivedAt: null
-});
-
-const createTemplateLookup = (drafts: HabitTemplateDraft[]) => {
-  const lookup = new Map<string, HabitTemplateDraft>();
-
-  for (const draft of drafts) {
-    const candidates = unique([
-      draft.sourceKey,
-      draft.title,
-      draft.title.toLowerCase(),
-      draft.sourceKey.toLowerCase()
-    ].filter(Boolean) as string[]);
-
-    for (const candidate of candidates) {
-      lookup.set(candidate, draft);
-    }
-  }
-
-  return lookup;
+const normalizeSourceType = (value: string, fallback: HabitSourceType): HabitSourceType => {
+  const normalized = value.trim().toLowerCase();
+  return validSourceTypes.has(normalized) ? (normalized as HabitSourceType) : fallback;
 };
 
-const resolveTemplateDraft = (
-  drafts: HabitTemplateDraft[],
-  lookup: Map<string, HabitTemplateDraft>,
-  candidate: string,
-  sourceName: string,
-  sourceType: HabitSourceType,
-  sortOrder: number,
-  warnings: string[],
-  mappingNotes: string[]
-) => {
-  const resolved = resolveTemplateByName(drafts, candidate);
-  if (resolved) {
-    return resolved;
-  }
-
-  const cleaned = candidate.trim();
-  const sourceKey = `auto-${slugify(cleaned)}`;
-  const existing = lookup.get(sourceKey);
-
-  if (existing) {
-    return existing;
-  }
-
-  const placeholder = createPlaceholderTemplate(sourceKey, cleaned, sourceName, sourceType, sortOrder);
-  drafts.push(placeholder);
-  lookup.set(sourceKey, placeholder);
-  lookup.set(cleaned, placeholder);
-  lookup.set(cleaned.toLowerCase(), placeholder);
-  warnings.push(`未找到与 "${candidate}" 匹配的习惯模板，已自动创建占位模板。`);
-  mappingNotes.push(`自动占位: ${candidate} -> ${placeholder.title}`);
-  return placeholder;
+const normalizeFrequencyKind = (value: string): FrequencyKind => {
+  const normalized = value.trim().toLowerCase();
+  return validFrequencyKinds.has(normalized) ? (normalized as FrequencyKind) : 'daily';
 };
 
-const inferCompletionStateFromValue = (value: string | null | undefined) => {
-  const normalized = safeTrim(value)?.toUpperCase();
+const normalizeTargetType = (value: string | null | undefined) =>
+  value?.trim().toUpperCase() === 'AT_MOST' ? 'AT_MOST' : 'AT_LEAST';
 
-  if (!normalized) {
-    return 'unknown' as const;
+const normalizeTaskType = (value: string | null | undefined) =>
+  value?.trim().toLowerCase() === 'range' ? 'range' : 'single';
+
+const parseFrequencyRule = (value: string) => {
+  const text = value.trim();
+  if (!text) {
+    return {};
   }
 
-  if (yesValues.has(normalized)) {
-    return 'done' as const;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return { raw: text };
   }
-
-  if (noValues.has(normalized)) {
-    return 'missed' as const;
-  }
-
-  if (normalized === 'UNKNOWN') {
-    return 'unknown' as const;
-  }
-
-  return 'recorded' as const;
 };
 
-const inferTemplateTitleFromPath = (path: string) => {
-  const folder = parentName(path);
-  if (!folder) {
-    return '';
+const parseCompletionState = (row: CsvRowObject, valueNumber: number | null, valueText: string | null) => {
+  const explicit = safeTrim(getRowValue(row, ['completion_state', 'completion state']));
+  if (explicit) {
+    return normalizeCompletionState(explicit);
   }
 
-  return folder.replace(/^\d+\s*[-_.:]?\s*/, '').trim();
+  const isDone = safeTrim(getRowValue(row, ['is_done', 'is done']));
+  if (isDone) {
+    const normalized = isDone.toLowerCase();
+    if (['true', '1', 'yes', 'done'].includes(normalized)) return 'done' as const;
+    if (['false', '0', 'no', 'missed'].includes(normalized)) return 'missed' as const;
+  }
+
+  return valueNumber !== null || valueText ? 'recorded' as const : 'unknown' as const;
 };
 
-const detectFileKind = (path: string, headers: string[], rows: string[][]): ImportFileKind => {
+const detectFileKind = (path: string, headers: string[]): ImportFileKind => {
   const lowerName = basename(path).toLowerCase();
   const normalizedHeaders = headers.map((header) => normalizeHeader(header).toLowerCase());
   const hasHeader = (name: string) => normalizedHeaders.includes(name.toLowerCase());
-  const isMatrix = normalizedHeaders[0] === 'date' && headers.length > 2;
-
-  if (lowerName === 'habits.csv' && hasHeader('name') && hasHeader('position')) {
-    return 'loop_habits_templates';
-  }
-
-  if (lowerName === 'checkmarks.csv' || lowerName === 'scores.csv') {
-    if (normalizedHeaders.length <= 3 && (hasHeader('value') || hasHeader('score'))) {
-      return 'loop_habits_record_rows';
-    }
-
-    if (isMatrix) {
-      return lowerName === 'checkmarks.csv'
-        ? 'loop_habits_matrix_checkmarks'
-        : 'loop_habits_matrix_scores';
-    }
-  }
 
   if (
-    (hasHeader('source_key') || hasHeader('source key')) &&
-    (hasHeader('title') || hasHeader('name')) &&
-    !hasHeader('date')
+    lowerName === 'habit-templates.csv' ||
+    lowerName === 'habit_templates.csv' ||
+    (
+      (hasHeader('source_key') || hasHeader('source key')) &&
+      (hasHeader('title') || hasHeader('name')) &&
+      !hasHeader('record_date') &&
+      !hasHeader('task_date')
+    )
   ) {
     return 'habit_templates';
   }
 
   if (
-    (hasHeader('template_source_key') || hasHeader('template key') || hasHeader('template_id')) &&
-    (hasHeader('record_date') || hasHeader('date'))
+    lowerName === 'habit-records.csv' ||
+    lowerName === 'habit_records.csv' ||
+    (
+      (hasHeader('template_source_key') || hasHeader('template key') || hasHeader('template_id')) &&
+      (hasHeader('record_date') || hasHeader('date'))
+    )
   ) {
     return 'habit_records';
   }
 
-  if ((hasHeader('task_date') || hasHeader('date')) && hasHeader('title')) {
+  if (lowerName === 'tasks.csv' || ((hasHeader('task_date') || hasHeader('date')) && hasHeader('title'))) {
     return 'tasks';
-  }
-
-  if (
-    normalizedHeaders[0] === 'date' &&
-    normalizedHeaders.some((header) => header === 'value' || header === 'score')
-  ) {
-    return 'loop_habits_record_rows';
   }
 
   return 'unknown';
@@ -308,11 +201,11 @@ const detectFileKind = (path: string, headers: string[], rows: string[][]): Impo
 
 const parseCsvFile = (path: string, text: string): ParsedCsvFile => {
   const { headers, rows } = parseCsv(text);
-  const kind = detectFileKind(path, headers, rows);
+  const kind = detectFileKind(path, headers);
   const warnings: string[] = [];
 
   if (kind === 'unknown') {
-    warnings.push(`无法自动识别文件类型: ${path}`);
+    warnings.push(`无法识别文件类型：${path}。请使用 tasks.csv、habit-templates.csv 或 habit-records.csv。`);
   }
 
   return {
@@ -341,14 +234,22 @@ const parseTaskDrafts = (file: ParsedCsvFile) => {
 
     const status = getRowValue(data, ['status']).toLowerCase();
     const priority = getRowValue(data, ['priority']).toLowerCase();
+    const taskType = normalizeTaskType(getRowValue(data, ['task_type', 'task type']));
     const id = safeTrim(getRowValue(data, ['id']));
+    const rangeStartDate = safeTrim(getRowValue(data, ['range_start_date', 'range start date']));
+    const rangeEndDate = safeTrim(getRowValue(data, ['range_end_date', 'range end date']));
 
     drafts.push({
       id,
-      sourceKey: id ?? `${file.path}:${index}`,
+      sourceKey: id ?? `${file.path}:${index + 2}`,
       title,
       description: safeTrim(getRowValue(data, ['description'])),
       taskDate,
+      taskType,
+      rangeStartDate: rangeStartDate && isDateCell(rangeStartDate) ? rangeStartDate : null,
+      rangeEndDate: rangeEndDate && isDateCell(rangeEndDate) ? rangeEndDate : null,
+      progressValue: parseNumberMaybe(getRowValue(data, ['progress_value', 'progress value'])),
+      targetValue: parseNumberMaybe(getRowValue(data, ['target_value', 'target value'])),
       startTime: safeTrim(getRowValue(data, ['start_time', 'start time'])),
       endTime: safeTrim(getRowValue(data, ['end_time', 'end time'])),
       priority: validPriorities.has(priority) ? (priority as TaskDraft['priority']) : 'medium',
@@ -364,66 +265,29 @@ const parseTaskDrafts = (file: ParsedCsvFile) => {
 const parseHabitTemplateDrafts = (file: ParsedCsvFile) => {
   const drafts: HabitTemplateDraft[] = [];
   const warnings: string[] = [];
+  const fallbackSourceType = inferSourceType(file.path);
 
   for (const [index, row] of file.rows.entries()) {
     const data = toObjectRow(file.headers, row);
-
-    if (file.kind === 'loop_habits_templates') {
-      drafts.push(
-        buildHabitTemplateDraft(
-          {
-            Position: getRowValue(data, ['Position']),
-            Name: getRowValue(data, ['Name']),
-            Type: getRowValue(data, ['Type']),
-            Question: getRowValue(data, ['Question']),
-            Description: getRowValue(data, ['Description']),
-            FrequencyNumerator: getRowValue(data, ['FrequencyNumerator']),
-            FrequencyDenominator: getRowValue(data, ['FrequencyDenominator']),
-            Color: getRowValue(data, ['Color']),
-            Unit: getRowValue(data, ['Unit']),
-            'Target Type': getRowValue(data, ['Target Type']),
-            'Target Value': getRowValue(data, ['Target Value']),
-            'Archived?': getRowValue(data, ['Archived?'])
-          },
-          index,
-          file.path,
-          inferSourceType(file.path)
-        )
-      );
-      continue;
-    }
-
     const sourceKey = safeTrim(getRowValue(data, ['source_key', 'source key'])) ?? `template-${index + 1}`;
     const title = safeTrim(getRowValue(data, ['title', 'name'])) ?? sourceKey;
+    const startDate = safeTrim(getRowValue(data, ['start_date', 'start date']));
 
     drafts.push({
       sourceKey,
-      sourceName: file.path,
-      sourceType: inferSourceType(file.path),
-      sortOrder: index,
+      sourceName: safeTrim(getRowValue(data, ['source_name', 'source name'])) ?? file.path,
+      sourceType: normalizeSourceType(getRowValue(data, ['source_type', 'source type']), fallbackSourceType),
+      sortOrder: parseNumberMaybe(getRowValue(data, ['sort_order', 'sort order'])) ?? index,
       title,
       description: safeTrim(getRowValue(data, ['description'])),
       question: safeTrim(getRowValue(data, ['question'])),
-      frequencyKind:
-        (safeTrim(getRowValue(data, ['frequency_kind', 'frequency kind']))?.toLowerCase() as
-          | HabitTemplateDraft['frequencyKind']
-          | undefined) ?? 'daily',
-      frequencyRule: (() => {
-        const ruleText = safeTrim(getRowValue(data, ['frequency_rule', 'frequency rule']));
-        if (!ruleText) {
-          return {};
-        }
-
-        try {
-          return JSON.parse(ruleText) as Record<string, unknown>;
-        } catch {
-          return { legacy: ruleText };
-        }
-      })(),
+      frequencyKind: normalizeFrequencyKind(getRowValue(data, ['frequency_kind', 'frequency kind'])),
+      frequencyRule: parseFrequencyRule(getRowValue(data, ['frequency_rule', 'frequency rule'])),
       unit: safeTrim(getRowValue(data, ['unit'])),
-      targetType: safeTrim(getRowValue(data, ['target_type', 'target type'])),
+      targetType: normalizeTargetType(getRowValue(data, ['target_type', 'target type'])),
       targetValue: parseNumberMaybe(getRowValue(data, ['target_value', 'target value'])),
       color: safeTrim(getRowValue(data, ['color'])),
+      startDate: startDate && isDateCell(startDate) ? startDate : null,
       archivedAt: safeTrim(getRowValue(data, ['archived_at', 'archived at']))
     });
   }
@@ -435,21 +299,28 @@ const parseHabitTemplateDrafts = (file: ParsedCsvFile) => {
   return { drafts, warnings };
 };
 
-const parseNormalizedHabitRecords = (
+const createTemplateLookup = (drafts: HabitTemplateDraft[]) => {
+  const lookup = new Map<string, HabitTemplateDraft>();
+
+  for (const draft of drafts) {
+    for (const candidate of unique([draft.sourceKey, draft.sourceKey.toLowerCase(), draft.title, draft.title.toLowerCase()])) {
+      lookup.set(candidate, draft);
+    }
+  }
+
+  return lookup;
+};
+
+const parseHabitRecordDrafts = (
   file: ParsedCsvFile,
-  templates: HabitTemplateDraft[],
-  templateLookup: Map<string, HabitTemplateDraft>,
-  recordDrafts: Map<string, HabitRecordDraft>,
-  warnings: string[],
-  mappingNotes: string[]
+  templateLookup: Map<string, HabitTemplateDraft>
 ) => {
+  const drafts: HabitRecordDraft[] = [];
+  const warnings: string[] = [];
+  const fallbackSourceType = inferSourceType(file.path);
+
   for (const [index, row] of file.rows.entries()) {
     const data = toObjectRow(file.headers, row);
-    const templateSourceKey =
-      safeTrim(getRowValue(data, ['template_source_key', 'template key', 'template_id'])) ?? '';
-    const templateTitle = safeTrim(
-      getRowValue(data, ['template_title', 'template name', 'title', 'name'])
-    );
     const recordDate = safeTrim(getRowValue(data, ['record_date', 'date']));
 
     if (!recordDate || !isDateCell(recordDate)) {
@@ -457,306 +328,45 @@ const parseNormalizedHabitRecords = (
       continue;
     }
 
-    let template =
-      templateSourceKey
-        ? templateLookup.get(templateSourceKey) ?? resolveTemplateByName(templates, templateSourceKey)
+    const explicitTemplateKey = safeTrim(getRowValue(data, ['template_source_key', 'template key', 'template_id']));
+    const templateTitle = safeTrim(getRowValue(data, ['template_title', 'template name', 'title', 'name']));
+    const matchedTemplate = explicitTemplateKey
+      ? templateLookup.get(explicitTemplateKey) ?? templateLookup.get(explicitTemplateKey.toLowerCase())
+      : templateTitle
+        ? templateLookup.get(templateTitle) ?? templateLookup.get(templateTitle.toLowerCase())
         : null;
+    const templateSourceKey = matchedTemplate?.sourceKey ?? explicitTemplateKey;
 
-    if (!template && templateTitle) {
-      template = resolveTemplateByName(templates, templateTitle);
+    if (!templateSourceKey) {
+      warnings.push(`记录文件 ${file.path} 第 ${index + 2} 行缺少 template_source_key，已跳过。`);
+      continue;
     }
 
-    if (!template) {
-      const fallbackCandidate = templateTitle ?? templateSourceKey ?? `record-${index + 1}`;
-      template = resolveTemplateDraft(
-        templates,
-        templateLookup,
-        fallbackCandidate,
-        file.path,
-        inferSourceType(file.path),
-        templates.length,
-        warnings,
-        mappingNotes
-      );
-    }
+    const valueText = safeTrim(getRowValue(data, ['value_text', 'value text']));
+    const valueNumber =
+      parseNumberMaybe(getRowValue(data, ['value_number', 'value number'])) ??
+      parseNumberMaybe(getRowValue(data, ['actual_value', 'actual value']));
+    const completionState = parseCompletionState(data, valueNumber, valueText);
+    const sourceKey =
+      safeTrim(getRowValue(data, ['source_key', 'source key'])) ??
+      createRecordSourceKey(templateSourceKey, recordDate);
 
-    const valueText = safeTrim(
-      getRowValue(data, ['value_text', 'value', 'checkmark', 'score', 'raw_value'])
-    );
-    const valueNumber = normalizeScaledNumber(parseNumberMaybe(
-      getRowValue(data, ['value_number', 'score', 'value', 'raw_value'])
-    ));
-    const completionStateRaw = safeTrim(getRowValue(data, ['completion_state', 'state']));
-    const draft: HabitRecordDraft = {
-      sourceKey: safeTrim(getRowValue(data, ['source_key'])) ?? createRecordSourceKey(template.sourceKey, recordDate),
+    drafts.push({
+      sourceKey,
       sourceName: file.path,
-      sourceType: inferSourceType(file.path),
-      templateSourceKey: template.sourceKey,
-      templateTitle: template.title,
+      sourceType: normalizeSourceType(getRowValue(data, ['source_type', 'source type']), fallbackSourceType),
+      templateSourceKey,
+      templateTitle: matchedTemplate?.title ?? templateTitle ?? templateSourceKey,
       recordDate,
       valueText,
       valueNumber,
-      completionState: completionStateRaw
-        ? (completionStateRaw as HabitRecordDraft['completionState'])
-        : valueNumber !== null
-          ? 'recorded'
-          : inferCompletionStateFromValue(valueText),
-      notes: safeTrim(getRowValue(data, ['notes', 'note'])),
+      completionState,
+      notes: safeTrim(getRowValue(data, ['notes'])),
       rawPayload: data
-    };
-
-    const key = createRecordSourceKey(template.sourceKey, recordDate);
-    const existing = recordDrafts.get(key);
-    recordDrafts.set(key, mergeRecordDraft(draft, existing));
-  }
-};
-
-const parseMatrixHabitRecords = (
-  file: ParsedCsvFile,
-  templates: HabitTemplateDraft[],
-  templateLookup: Map<string, HabitTemplateDraft>,
-  recordDrafts: Map<string, HabitRecordDraft>,
-  warnings: string[],
-  mappingNotes: string[]
-) => {
-  const valueHeader = file.kind === 'loop_habits_matrix_scores' ? 'score' : 'checkmark';
-
-  for (const [rowIndex, row] of file.rows.entries()) {
-    const date = safeTrim(row[0]);
-    if (!date || !isDateCell(date)) {
-      warnings.push(`矩阵文件 ${file.path} 第 ${rowIndex + 2} 行缺少有效日期，已跳过。`);
-      continue;
-    }
-
-    for (let columnIndex = 1; columnIndex < file.headers.length; columnIndex += 1) {
-      const columnName = safeTrim(file.headers[columnIndex]);
-      if (!columnName) {
-        continue;
-      }
-
-      const template = resolveTemplateDraft(
-        templates,
-        templateLookup,
-        columnName,
-        file.path,
-        inferSourceType(file.path),
-        templates.length,
-        warnings,
-        mappingNotes
-      );
-
-      const rawValue = safeTrim(row[columnIndex]);
-      if (!rawValue) {
-        continue;
-      }
-
-      if (valueHeader === 'score') {
-        const key = createRecordSourceKey(template.sourceKey, date);
-        const existing = recordDrafts.get(key);
-        if (existing) {
-          recordDrafts.set(key, {
-            ...existing,
-            rawPayload: {
-              ...existing.rawPayload,
-              loopScore: parseNumberMaybe(rawValue),
-              loopScoreRaw: rawValue
-            }
-          });
-        }
-        continue;
-      }
-
-      const completionState = inferCompletionStateFromValue(rawValue);
-      if (completionState === 'unknown') {
-        continue;
-      }
-
-      const numericRawValue = parseNumberMaybe(rawValue);
-      const valueNumber = isYesNoHabit(template)
-        ? completionState === 'done'
-          ? 1
-          : 0
-        : normalizeScaledNumber(numericRawValue);
-
-      const draft: HabitRecordDraft = {
-        sourceKey: createRecordSourceKey(template.sourceKey, date),
-        sourceName: file.path,
-        sourceType: inferSourceType(file.path),
-        templateSourceKey: template.sourceKey,
-        templateTitle: template.title,
-        recordDate: date,
-        valueText: isYesNoHabit(template) ? (completionState === 'done' ? '1' : '0') : rawValue,
-        valueNumber,
-        completionState: isYesNoHabit(template)
-          ? completionState === 'done'
-            ? 'done'
-            : 'missed'
-          : numericRawValue !== null
-            ? 'recorded'
-            : completionState,
-        notes: null,
-        rawPayload: {
-          sourceFile: file.path,
-          sourceColumn: columnName,
-          rawValue
-        }
-      };
-
-      const key = createRecordSourceKey(template.sourceKey, date);
-      const existing = recordDrafts.get(key);
-      recordDrafts.set(key, mergeRecordDraft(draft, existing));
-    }
-  }
-};
-
-const parseRowBasedHabitRecords = (
-  file: ParsedCsvFile,
-  templates: HabitTemplateDraft[],
-  templateLookup: Map<string, HabitTemplateDraft>,
-  recordDrafts: Map<string, HabitRecordDraft>,
-  warnings: string[],
-  mappingNotes: string[]
-) => {
-  const parent = inferTemplateTitleFromPath(file.path);
-  const templateCandidate = parent || basename(file.path);
-  const isScoreFile = basename(file.path).toLowerCase() === 'scores.csv';
-
-  for (const [index, row] of file.rows.entries()) {
-    const data = toObjectRow(file.headers, row);
-    const date = safeTrim(getRowValue(data, ['date', 'record_date']));
-    if (!date || !isDateCell(date)) {
-      warnings.push(`记录文件 ${file.path} 第 ${index + 2} 行缺少有效日期，已跳过。`);
-      continue;
-    }
-
-    const template = resolveTemplateDraft(
-      templates,
-      templateLookup,
-      templateCandidate,
-      file.path,
-      inferSourceType(file.path),
-      templates.length,
-      warnings,
-      mappingNotes
-    );
-
-    const valueRaw = safeTrim(getRowValue(data, ['value', 'score', 'checkmark']));
-    const notes = safeTrim(getRowValue(data, ['notes', 'note']));
-    const numericValue = parseNumberMaybe(valueRaw);
-    const key = createRecordSourceKey(template.sourceKey, date);
-
-    if (isScoreFile) {
-      const existing = recordDrafts.get(key);
-      if (existing) {
-        recordDrafts.set(key, {
-          ...existing,
-          rawPayload: {
-            ...existing.rawPayload,
-            loopScore: numericValue,
-            loopScoreRaw: valueRaw
-          }
-        });
-      }
-      continue;
-    }
-
-    const completionState = inferCompletionStateFromValue(valueRaw);
-    if (completionState === 'unknown') {
-      continue;
-    }
-
-    const valueNumber = isYesNoHabit(template)
-      ? completionState === 'done'
-        ? 1
-        : 0
-      : normalizeScaledNumber(numericValue);
-
-    const draft: HabitRecordDraft = {
-      sourceKey: safeTrim(getRowValue(data, ['source_key'])) ?? createRecordSourceKey(template.sourceKey, date),
-      sourceName: file.path,
-      sourceType: inferSourceType(file.path),
-      templateSourceKey: template.sourceKey,
-      templateTitle: template.title,
-      recordDate: date,
-      valueText: isYesNoHabit(template) ? (completionState === 'done' ? '1' : '0') : valueRaw,
-      valueNumber,
-      completionState:
-        isYesNoHabit(template)
-          ? completionState === 'done'
-            ? 'done'
-            : 'missed'
-          : numericValue !== null
-            ? 'recorded'
-            : completionState,
-      notes,
-      rawPayload: data
-    };
-
-    const existing = recordDrafts.get(key);
-    recordDrafts.set(key, mergeRecordDraft(draft, existing));
-  }
-};
-
-const parseGenericFile = (
-  file: ParsedCsvFile,
-  templates: HabitTemplateDraft[],
-  templateLookup: Map<string, HabitTemplateDraft>,
-  recordDrafts: Map<string, HabitRecordDraft>,
-  taskDrafts: TaskDraft[],
-  warnings: string[],
-  mappingNotes: string[]
-) => {
-  if (file.kind === 'tasks') {
-    const { drafts, warnings: taskWarnings } = parseTaskDrafts(file);
-    taskDrafts.push(...drafts);
-    warnings.push(...taskWarnings);
-    return;
+    });
   }
 
-  if (file.kind === 'habit_templates' || file.kind === 'loop_habits_templates') {
-    const { drafts, warnings: templateWarnings } = parseHabitTemplateDrafts(file);
-    templates.push(...drafts);
-    warnings.push(...templateWarnings);
-    return;
-  }
-
-  if (file.kind === 'habit_records') {
-    parseNormalizedHabitRecords(
-      file,
-      templates,
-      templateLookup,
-      recordDrafts,
-      warnings,
-      mappingNotes
-    );
-    return;
-  }
-
-  if (
-    file.kind === 'loop_habits_matrix_checkmarks' ||
-    file.kind === 'loop_habits_matrix_scores'
-  ) {
-    parseMatrixHabitRecords(
-      file,
-      templates,
-      templateLookup,
-      recordDrafts,
-      warnings,
-      mappingNotes
-    );
-    return;
-  }
-
-  if (file.kind === 'loop_habits_record_rows') {
-    parseRowBasedHabitRecords(
-      file,
-      templates,
-      templateLookup,
-      recordDrafts,
-      warnings,
-      mappingNotes
-    );
-  }
+  return { drafts, warnings };
 };
 
 const normalizeTemplateDrafts = (drafts: HabitTemplateDraft[]) => {
@@ -777,104 +387,82 @@ const normalizeTemplateDrafts = (drafts: HabitTemplateDraft[]) => {
       frequencyRule: {
         ...existing.frequencyRule,
         ...draft.frequencyRule
-      }
+      },
+      startDate: draft.startDate ?? existing.startDate
     });
   }
 
   return Array.from(seen.values()).sort((left, right) => left.sortOrder - right.sortOrder);
 };
 
-const normalizeRecordDrafts = (drafts: Map<string, HabitRecordDraft>) =>
-  Array.from(drafts.values()).sort((left, right) => {
-    if (left.recordDate === right.recordDate) {
-      return left.templateTitle.localeCompare(right.templateTitle, 'zh-CN');
-    }
-
-    return left.recordDate.localeCompare(right.recordDate);
-  });
-
 const normalizeTaskDrafts = (drafts: TaskDraft[]) =>
   [...drafts].sort((left, right) => left.taskDate.localeCompare(right.taskDate));
+
+const normalizeRecordDrafts = (drafts: HabitRecordDraft[]) =>
+  [...drafts].sort((left, right) =>
+    left.recordDate.localeCompare(right.recordDate) ||
+    left.templateTitle.localeCompare(right.templateTitle, 'zh-CN')
+  );
 
 const buildPreviewFromFiles = (
   fileName: string,
   sourceType: 'csv' | 'zip',
   files: ParsedCsvFile[]
 ): ImportPreview => {
-  const warnings: string[] = [];
+  const warnings = files.flatMap((file) => file.warnings);
   const mappingNotes: string[] = [];
-  const templates: HabitTemplateDraft[] = [];
-  const templateLookup = new Map<string, HabitTemplateDraft>();
-  const recordDrafts = new Map<string, HabitRecordDraft>();
   const taskDrafts: TaskDraft[] = [];
+  const templateDrafts: HabitTemplateDraft[] = [];
+  const recordDrafts: HabitRecordDraft[] = [];
 
-  const templateFiles = files.filter((file) =>
-    file.kind === 'loop_habits_templates' || file.kind === 'habit_templates'
-  );
-
-  for (const file of templateFiles) {
-    const { drafts, warnings: templateWarnings } = parseHabitTemplateDrafts(file);
-    templates.push(...drafts);
-    warnings.push(...templateWarnings);
+  for (const file of files.filter((entry) => entry.kind === 'habit_templates')) {
+    const result = parseHabitTemplateDrafts(file);
+    templateDrafts.push(...result.drafts);
+    warnings.push(...result.warnings);
+    mappingNotes.push(`${file.name}: 识别为习惯模板 CSV`);
   }
 
-  const normalizedTemplates = normalizeTemplateDrafts(templates);
-  normalizedTemplates.forEach((draft) => {
-    const candidates = unique([
-      draft.sourceKey,
-      draft.sourceKey.toLowerCase(),
-      draft.title,
-      draft.title.toLowerCase()
-    ]);
-    for (const candidate of candidates) {
-      templateLookup.set(candidate, draft);
-    }
-  });
+  const normalizedTemplates = normalizeTemplateDrafts(templateDrafts);
+  const templateLookup = createTemplateLookup(normalizedTemplates);
 
   for (const file of files) {
-    if (templateFiles.includes(file)) {
-      continue;
+    if (file.kind === 'tasks') {
+      const result = parseTaskDrafts(file);
+      taskDrafts.push(...result.drafts);
+      warnings.push(...result.warnings);
+      mappingNotes.push(`${file.name}: 识别为任务 CSV`);
     }
 
-    parseGenericFile(
-      file,
-      normalizedTemplates,
-      templateLookup,
-      recordDrafts,
-      taskDrafts,
-      warnings,
-      mappingNotes
-    );
+    if (file.kind === 'habit_records') {
+      const result = parseHabitRecordDrafts(file, templateLookup);
+      recordDrafts.push(...result.drafts);
+      warnings.push(...result.warnings);
+      mappingNotes.push(`${file.name}: 识别为习惯记录 CSV`);
+    }
   }
 
-  const parsedFiles = files.map<ParsedCsvFile>((file) => ({
-    ...file,
-    warnings: [...file.warnings]
-  }));
+  const normalizedRecords = normalizeRecordDrafts(recordDrafts);
+  const firstRecordDateByTemplateKey = new Map<string, string>();
+  for (const record of normalizedRecords) {
+    const current = firstRecordDateByTemplateKey.get(record.templateSourceKey);
+    if (!current || record.recordDate < current) {
+      firstRecordDateByTemplateKey.set(record.templateSourceKey, record.recordDate);
+    }
+  }
 
-  const cleanedTemplates = normalizeTemplateDrafts(normalizedTemplates).filter(
-    (template) => !(template.sourceKey.startsWith('auto-') && template.title.toLowerCase().endsWith('.csv'))
-  );
-  const allowedTemplateKeys = new Set(cleanedTemplates.map((template) => template.sourceKey));
-  const cleanedRecords = normalizeRecordDrafts(recordDrafts).filter((record) =>
-    allowedTemplateKeys.has(record.templateSourceKey)
-  );
-  const cleanedWarnings = unique(warnings).filter(
-    (warning) =>
-      !(
-        warning.includes('未找到与 "Scores.csv" 匹配的习惯模板') ||
-        warning.includes('未找到与 "Checkmarks.csv" 匹配的习惯模板')
-      )
-  );
+  const templatesWithStartDates = normalizedTemplates.map((template) => ({
+    ...template,
+    startDate: template.startDate ?? firstRecordDateByTemplateKey.get(template.sourceKey) ?? getBeijingDateInput()
+  }));
 
   return {
     fileName,
     sourceType,
-    files: parsedFiles,
-    templateDrafts: cleanedTemplates,
-    recordDrafts: cleanedRecords,
+    files,
+    templateDrafts: templatesWithStartDates,
+    recordDrafts: normalizedRecords,
     taskDrafts: normalizeTaskDrafts(taskDrafts),
-    warnings: cleanedWarnings,
+    warnings: unique(warnings),
     mappingNotes: unique(mappingNotes)
   };
 };
@@ -885,40 +473,23 @@ const readZipToFiles = async (file: File) => {
     (entry) => !entry.dir && entry.name.toLowerCase().endsWith('.csv')
   );
 
-  const parsed = await Promise.all(
+  return Promise.all(
     entries.map(async (entry) => {
       const text = await entry.async('string');
       return parseCsvFile(entry.name, text);
     })
   );
-
-  return parsed;
 };
 
 export const loadImportPreview = async (file: File): Promise<ImportPreview> => {
   const lowerName = file.name.toLowerCase();
 
   if (lowerName.endsWith('.zip') || file.type.includes('zip')) {
-    const files = await readZipToFiles(file);
-    const hasNormalizedBundle = files.some((entry) =>
-      ['habit_templates', 'habit_records', 'tasks'].includes(entry.kind)
-    );
-    const legacyKinds = new Set<ImportFileKind>([
-      'loop_habits_templates',
-      'loop_habits_matrix_checkmarks',
-      'loop_habits_matrix_scores',
-      'loop_habits_record_rows'
-    ]);
-    const filteredFiles = hasNormalizedBundle
-      ? files.filter((entry) => !legacyKinds.has(entry.kind))
-      : files;
-    return buildPreviewFromFiles(file.name, 'zip', filteredFiles);
+    return buildPreviewFromFiles(file.name, 'zip', await readZipToFiles(file));
   }
 
   if (lowerName.endsWith('.csv')) {
-    const text = await file.text();
-    const parsed = parseCsvFile(file.name, text);
-    return buildPreviewFromFiles(file.name, 'csv', [parsed]);
+    return buildPreviewFromFiles(file.name, 'csv', [parseCsvFile(file.name, await file.text())]);
   }
 
   throw new Error('只支持 CSV 或 ZIP 文件。');
@@ -960,7 +531,8 @@ const createImportJobItems = (
       mapped_payload: {
         entity: 'habit_template',
         source_key: draft.sourceKey,
-        title: draft.title
+        title: draft.title,
+        start_date: draft.startDate
       },
       status: 'ok',
       error_message: null
@@ -979,7 +551,6 @@ const createImportJobItems = (
         entity: 'habit_record',
         template_source_key: draft.templateSourceKey,
         record_date: draft.recordDate,
-        value_text: draft.valueText,
         value_number: draft.valueNumber,
         completion_state: draft.completionState
       },
@@ -992,7 +563,7 @@ const createImportJobItems = (
     items.push({
       job_id: jobId,
       user_id: userId,
-      source_name: draft.sourceKey,
+      source_name: preview.fileName,
       sheet_name: 'tasks',
       source_key: draft.sourceKey,
       raw_payload: toJsonValue(draft) as Record<string, unknown>,
@@ -1036,6 +607,49 @@ const insertRows = async <T extends Record<string, unknown>>(
   return results;
 };
 
+const omitKeys = <T extends Record<string, unknown>>(value: T, keys: string[]) => {
+  const next = { ...value };
+  for (const key of keys) {
+    delete next[key];
+  }
+  return next;
+};
+
+const insertTasksWithFallback = async (
+  supabase: SupabaseClient,
+  rows: Array<Record<string, unknown>>
+) => {
+  const attempts = [
+    rows,
+    rows.map((row) => omitKeys(row, ['importance'])),
+    rows.map((row) => omitKeys(row, ['task_type', 'range_start_date', 'range_end_date', 'progress_value', 'target_value'])),
+    rows.map((row) => omitKeys(row, ['importance', 'task_type', 'range_start_date', 'range_end_date', 'progress_value', 'target_value']))
+  ];
+
+  let lastError: unknown = null;
+
+  for (const attempt of attempts) {
+    try {
+      return await insertRows(supabase, 'tasks', attempt, { onConflict: 'id' });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'object' && error && 'message' in error
+            ? String((error as { message?: unknown }).message)
+            : String(error);
+
+      if (!isSchemaError(message) && !message.includes('importance')) {
+        throw error;
+      }
+
+      lastError = error;
+    }
+  }
+
+  throw lastError;
+};
+
 export const commitImportPreview = async (
   supabase: SupabaseClient,
   userId: string,
@@ -1054,7 +668,8 @@ export const commitImportPreview = async (
     config: {
       warnings: preview.warnings,
       mappingNotes: preview.mappingNotes,
-      sourceFileCount: preview.files.length
+      sourceFileCount: preview.files.length,
+      format: 'life-project-csv-v2'
     }
   };
 
@@ -1084,10 +699,11 @@ export const commitImportPreview = async (
       frequency_kind: draft.frequencyKind,
       frequency_rule: toJsonValue(draft.frequencyRule),
       unit: draft.unit,
-      target_type: draft.targetType,
+      target_type: normalizeTargetType(draft.targetType),
       target_value: draft.targetValue,
       color: draft.color,
       sort_order: draft.sortOrder,
+      start_date: draft.startDate ?? getBeijingDateInput(),
       archived_at: draft.archivedAt
     }));
 
@@ -1099,21 +715,24 @@ export const commitImportPreview = async (
     );
 
     const templateByKey = new Map(
-      savedTemplates.map((template) => [template.source_key, template as HabitTemplateRow])
+      savedTemplates.map((template) => [String(template.source_key), template as HabitTemplateRow])
     );
+    const recordTemplateKeys = unique(preview.recordDrafts.map((draft) => draft.templateSourceKey));
+    const missingTemplateKeys = recordTemplateKeys.filter((key) => !templateByKey.has(key));
 
-    for (const draft of preview.templateDrafts) {
-      if (!templateByKey.has(draft.sourceKey)) {
-        const { data } = await supabase
-          .from('habit_templates')
-          .select()
-          .eq('user_id', userId)
-          .eq('source_key', draft.sourceKey)
-          .single();
+    if (missingTemplateKeys.length) {
+      const { data, error } = await supabase
+        .from('habit_templates')
+        .select()
+        .eq('user_id', userId)
+        .in('source_key', missingTemplateKeys);
 
-        if (data) {
-          templateByKey.set(draft.sourceKey, data as HabitTemplateRow);
-        }
+      if (error) {
+        throw error;
+      }
+
+      for (const row of data ?? []) {
+        templateByKey.set(String(row.source_key), row as HabitTemplateRow);
       }
     }
 
@@ -1144,9 +763,14 @@ export const commitImportPreview = async (
       user_id: userId,
       title: draft.title,
       description: draft.description,
-      task_date: draft.taskDate,
-      start_time: draft.startTime,
-      end_time: draft.endTime,
+      task_date: draft.taskType === 'range' ? draft.rangeStartDate ?? draft.taskDate : draft.taskDate,
+      task_type: draft.taskType,
+      range_start_date: draft.taskType === 'range' ? draft.rangeStartDate ?? draft.taskDate : null,
+      range_end_date: draft.taskType === 'range' ? draft.rangeEndDate ?? draft.rangeStartDate ?? draft.taskDate : null,
+      progress_value: draft.progressValue,
+      target_value: draft.targetValue,
+      start_time: draft.taskType === 'range' ? null : draft.startTime,
+      end_time: draft.taskType === 'range' ? null : draft.endTime,
       status: draft.status,
       priority: draft.priority,
       importance: draft.importance,
@@ -1156,24 +780,7 @@ export const commitImportPreview = async (
     const insertedRecords = await insertRows(supabase, 'habit_daily_records', recordRows, {
       onConflict: 'user_id,template_id,record_date'
     });
-    let insertedTasks: typeof taskRows = [];
-    try {
-      insertedTasks = await insertRows(supabase, 'tasks', taskRows, { onConflict: 'id' });
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : typeof error === 'object' && error && 'message' in error
-            ? String((error as { message?: unknown }).message)
-            : String(error);
-
-      if (!errorMessage.includes('importance')) {
-        throw error;
-      }
-
-      const fallbackTaskRows = taskRows.map(({ importance, ...row }) => row);
-      insertedTasks = await insertRows(supabase, 'tasks', fallbackTaskRows, { onConflict: 'id' }) as typeof taskRows;
-    }
+    const insertedTasks = await insertTasksWithFallback(supabase, taskRows);
 
     const successRows =
       preview.templateDrafts.length + insertedRecords.length + insertedTasks.length;
@@ -1226,6 +833,26 @@ export const commitImportPreview = async (
   }
 };
 
+const exportTaskRows = (tasks: HabitTaskLike[]) =>
+  tasks.map((task) => ({
+    id: task.id,
+    title: task.title,
+    description: task.description ?? '',
+    task_date: task.task_date,
+    task_type: task.task_type ?? 'single',
+    range_start_date: task.range_start_date ?? '',
+    range_end_date: task.range_end_date ?? '',
+    progress_value: task.progress_value ?? '',
+    target_value: task.target_value ?? '',
+    start_time: task.start_time ?? '',
+    end_time: task.end_time ?? '',
+    status: task.status,
+    priority: task.priority,
+    importance: task.importance ?? 50,
+    category: task.category ?? '',
+    deleted_at: task.deleted_at ?? ''
+  }));
+
 const exportTemplateRows = (templates: HabitTemplateRow[]) =>
   templates.map((template) => ({
     source_key: template.source_key,
@@ -1235,28 +862,14 @@ const exportTemplateRows = (templates: HabitTemplateRow[]) =>
     frequency_kind: template.frequency_kind,
     frequency_rule: JSON.stringify(template.frequency_rule ?? {}),
     unit: template.unit ?? '',
-    target_type: template.target_type ?? '',
+    target_type: normalizeTargetType(template.target_type),
     target_value: template.target_value ?? '',
     color: template.color ?? '',
     sort_order: template.sort_order,
+    start_date: template.start_date,
     archived_at: template.archived_at ?? '',
     source_name: template.source_name ?? '',
     source_type: template.source_type
-  }));
-
-const exportTaskRows = (tasks: HabitTaskLike[]) =>
-  tasks.map((task) => ({
-    id: task.id,
-    title: task.title,
-    description: task.description ?? '',
-    task_date: task.task_date,
-    start_time: task.start_time ?? '',
-    end_time: task.end_time ?? '',
-    status: task.status,
-    priority: task.priority,
-    importance: task.importance ?? 50,
-    category: task.category ?? '',
-    deleted_at: task.deleted_at ?? ''
   }));
 
 const buildDynamicScoreMap = (records: HabitDailyRecordRow[], templates: HabitTemplateRow[]) => {
@@ -1274,8 +887,8 @@ const buildDynamicScoreMap = (records: HabitDailyRecordRow[], templates: HabitTe
     const series = buildHabitScoreSeries(
       template,
       templateRecords,
-      templateRecords[0].record_date,
-      templateRecords.at(-1)?.record_date ?? templateRecords[0].record_date
+      template.start_date,
+      templateRecords.at(-1)?.record_date ?? template.start_date
     );
 
     for (const point of series) {
@@ -1292,7 +905,7 @@ const exportHabitRecordRows = (records: HabitDailyRecordRow[], templates: HabitT
 
   return records.map((record) => {
     const template = templateById.get(record.template_id);
-    const evaluation = template ? evaluateHabitRecord(template, record) : null;
+    const evaluation = template ? evaluateHabitRecord(template, record, record.record_date) : null;
     const score = dynamicScoreMap.get(`${record.template_id}:${record.record_date}`) ?? 0;
 
     return {
@@ -1304,8 +917,8 @@ const exportHabitRecordRows = (records: HabitDailyRecordRow[], templates: HabitT
       is_done: evaluation?.isDone ? 'true' : 'false',
       completion_ratio: evaluation?.completionRatio ?? 0,
       score,
-      value_text: '',
-      value_number: evaluation?.actualValue ?? 0,
+      value_text: record.value_text ?? '',
+      value_number: record.value_number ?? evaluation?.actualValue ?? '',
       completion_state: record.completion_state,
       notes: record.notes ?? '',
       source_type: record.source_type,
@@ -1329,8 +942,8 @@ const exportHabitScoreRows = (records: HabitDailyRecordRow[], templates: HabitTe
     const series = buildHabitScoreSeries(
       template,
       templateRecords,
-      templateRecords[0].record_date,
-      templateRecords.at(-1)?.record_date ?? templateRecords[0].record_date
+      template.start_date,
+      templateRecords.at(-1)?.record_date ?? template.start_date
     );
 
     for (const point of series) {
@@ -1351,108 +964,6 @@ const exportHabitScoreRows = (records: HabitDailyRecordRow[], templates: HabitTe
   );
 };
 
-const exportLegacyHabitsRows = (templates: HabitTemplateRow[]) =>
-  templates.map((template, index) => {
-    const rule = template.frequency_rule ?? {};
-    const legacyRule = typeof rule === 'object' && rule !== null ? rule : {};
-    const numerator = typeof legacyRule === 'object' ? (legacyRule as Record<string, unknown>).numerator : undefined;
-    const denominator =
-      typeof legacyRule === 'object' ? (legacyRule as Record<string, unknown>).denominator : undefined;
-
-    return {
-      Position: String(index + 1).padStart(3, '0'),
-      Name: template.title,
-      Type: (legacyRule as Record<string, unknown>).type ?? template.frequency_kind.toUpperCase(),
-      Question: template.question ?? '',
-      Description: template.description ?? '',
-      FrequencyNumerator: numerator ?? 1,
-      FrequencyDenominator: denominator ?? 1,
-      Color: template.color ?? '',
-      Unit: template.unit ?? '',
-      'Target Type': template.target_type ?? '',
-      'Target Value': template.target_value ?? '',
-      'Archived?': template.archived_at ? 'true' : 'false',
-      'Source Key': template.source_key,
-      'Source Type': template.source_type
-    };
-  });
-
-const buildLegacyMatrixRows = (
-  records: HabitDailyRecordRow[],
-  templates: HabitTemplateRow[],
-  metric: 'checkmark' | 'score'
-) => {
-  const templateOrder = [...templates].sort((left, right) => left.sort_order - right.sort_order);
-  const templateMap = new Map(templateOrder.map((template) => [template.id, template]));
-  const dynamicScoreMap = buildDynamicScoreMap(records, templates);
-  const dates = unique(records.map((record) => record.record_date)).sort();
-  const recordMap = new Map<string, HabitDailyRecordRow>();
-
-  for (const record of records) {
-    recordMap.set(`${record.record_date}:${record.template_id}`, record);
-  }
-
-  const rows = dates.map((date) => {
-    const row: Record<string, unknown> = { Date: date };
-
-    for (const template of templateOrder) {
-      const record = recordMap.get(`${date}:${template.id}`);
-      if (!record) {
-        row[template.title] = '';
-        continue;
-      }
-
-      if (metric === 'score') {
-        row[template.title] = dynamicScoreMap.get(`${template.id}:${date}`) ?? 0;
-      } else {
-        row[template.title] = evaluateHabitRecord(template, record).isDone ? 'YES_MANUAL' : 'UNKNOWN';
-      }
-    }
-
-    return row;
-  });
-
-  return {
-    headers: ['Date', ...templateOrder.map((template) => template.title)],
-    rows
-  };
-};
-
-const buildLegacyPerHabitRows = (
-  templates: HabitTemplateRow[],
-  records: HabitDailyRecordRow[]
-) => {
-  const templateById = new Map(templates.map((template) => [template.id, template]));
-  const dynamicScoreMap = buildDynamicScoreMap(records, templates);
-  const rowsByTemplate = new Map<string, HabitDailyRecordRow[]>();
-
-  for (const record of records) {
-    const list = rowsByTemplate.get(record.template_id) ?? [];
-    list.push(record);
-    rowsByTemplate.set(record.template_id, list);
-  }
-
-  return templates.map((template) => ({
-    folder: `${String(template.sort_order + 1).padStart(3, '0')} ${template.title}`,
-    template,
-    checkmarks: (rowsByTemplate.get(template.id) ?? [])
-      .slice()
-      .sort((left, right) => right.record_date.localeCompare(left.record_date))
-      .map((record) => ({
-        Date: record.record_date,
-        Value: evaluateHabitRecord(template, record).actualValue,
-        Notes: record.notes ?? ''
-      })),
-    scores: (rowsByTemplate.get(template.id) ?? [])
-      .slice()
-      .sort((left, right) => right.record_date.localeCompare(left.record_date))
-      .map((record) => ({
-        Date: record.record_date,
-        Score: dynamicScoreMap.get(`${template.id}:${record.record_date}`) ?? 0
-      }))
-  }));
-};
-
 export const buildExportJson = (input: ExportBundleInput) => {
   const summaries = buildDailySummaries(input.tasks, input.records, input.templates);
   const heatmap = buildHeatmapWeeks(summaries, 'activity');
@@ -1461,7 +972,8 @@ export const buildExportJson = (input: ExportBundleInput) => {
   return JSON.stringify(
     {
       manifest: {
-        version: 1,
+        version: 2,
+        format: 'life-project-csv-v2',
         generatedAt: new Date().toISOString(),
         counts: {
           tasks: input.tasks.length,
@@ -1491,7 +1003,8 @@ export const buildExportZip = async (input: ExportBundleInput) => {
     'manifest.json',
     JSON.stringify(
       {
-        version: 1,
+        version: 2,
+        format: 'life-project-csv-v2',
         generatedAt: new Date().toISOString(),
         counts: {
           tasks: input.tasks.length,
@@ -1510,6 +1023,11 @@ export const buildExportZip = async (input: ExportBundleInput) => {
     'title',
     'description',
     'task_date',
+    'task_type',
+    'range_start_date',
+    'range_end_date',
+    'progress_value',
+    'target_value',
     'start_time',
     'end_time',
     'status',
@@ -1534,6 +1052,7 @@ export const buildExportZip = async (input: ExportBundleInput) => {
         'target_value',
         'color',
         'sort_order',
+        'start_date',
         'archived_at',
         'source_name',
         'source_type'
@@ -1583,46 +1102,7 @@ export const buildExportZip = async (input: ExportBundleInput) => {
   zip.file('heatmap.json', JSON.stringify(heatmap, null, 2));
   zip.file('summary.json', buildExportJson(input));
 
-  const legacyFolder = zip.folder('loop-habits-legacy');
-  if (legacyFolder) {
-    legacyFolder.file('Habits.csv', stringifyCsvObjects([
-      'Position',
-      'Name',
-      'Type',
-      'Question',
-      'Description',
-      'FrequencyNumerator',
-      'FrequencyDenominator',
-      'Color',
-      'Unit',
-      'Target Type',
-      'Target Value',
-      'Archived?',
-      'Source Key',
-      'Source Type'
-    ], exportLegacyHabitsRows(input.templates)));
-
-    const matrixCheckmarks = buildLegacyMatrixRows(input.records, input.templates, 'checkmark');
-    const matrixScores = buildLegacyMatrixRows(input.records, input.templates, 'score');
-    legacyFolder.file('Checkmarks.csv', stringifyCsv(matrixCheckmarks.headers, matrixCheckmarks.rows.map((row) => matrixCheckmarks.headers.map((header) => row[header] ?? ''))));
-    legacyFolder.file('Scores.csv', stringifyCsv(matrixScores.headers, matrixScores.rows.map((row) => matrixScores.headers.map((header) => row[header] ?? ''))));
-
-    for (const habit of buildLegacyPerHabitRows(input.templates, input.records)) {
-      const folder = legacyFolder.folder(habit.folder);
-      if (!folder) {
-        continue;
-      }
-
-      folder.file(
-        'Checkmarks.csv',
-        stringifyCsvObjects(['Date', 'Value', 'Notes'], habit.checkmarks)
-      );
-      folder.file('Scores.csv', stringifyCsvObjects(['Date', 'Score'], habit.scores));
-    }
-  }
-
-  const blob = await zip.generateAsync({ type: 'blob' });
-  return blob;
+  return zip.generateAsync({ type: 'blob' });
 };
 
 export type {

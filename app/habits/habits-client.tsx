@@ -6,9 +6,15 @@ import { useRouter } from 'next/navigation';
 import type { User } from '@supabase/supabase-js';
 
 import { AppShell, Panel, StatCard } from '@/components/app-shell';
+import {
+  habitDailyRecordSelectFields,
+  habitTemplateSelectFields,
+  habitTemplateSelectFieldsLegacy,
+  isSchemaError
+} from '@/lib/habit-db';
 import { supabase } from '@/lib/supabase/client';
 import { addMonths, clampDateInput, getBeijingDateInput, parseDateInput, shiftDateInput, toDateInputValue } from '@/lib/date';
-import { buildHabitScoreSeries, evaluateHabitRecord, formatHabitValue, habitImportance, isHabitDueOnDate, isYesNoHabit } from '@/lib/habit-domain';
+import { buildHabitScoreSeries, evaluateHabitRecord, formatHabitValue, habitImportance, isHabitDueOnDate } from '@/lib/habit-domain';
 import { completionHeatmapStyle } from '@/lib/heatmap-color';
 import { normalizeHabitRecordRow, normalizeHabitTemplateRow } from '@/lib/normalize-db-rows';
 import type { HabitDailyRecordRow, HabitGroupRow, HabitTemplateRow } from '@/types/habit';
@@ -28,6 +34,7 @@ type HabitFormState = {
   unitLabel: string;
   color: string;
   groupId: string;
+  startDate: string;
 };
 
 type RecordDraftState = {
@@ -50,7 +57,7 @@ const frequencyLabels = {
 } as const;
 const monthDays = Array.from({ length: 31 }, (_, index) => index + 1);
 
-const createHabitForm = (): HabitFormState => ({
+const createHabitForm = (startDate = getBeijingDateInput()): HabitFormState => ({
   title: '',
   description: '',
   question: '',
@@ -64,7 +71,8 @@ const createHabitForm = (): HabitFormState => ({
   targetValue: '',
   unitLabel: '',
   color: '#2563eb',
-  groupId: ''
+  groupId: '',
+  startDate
 });
 
 const createGroupForm = (): GroupFormState => ({
@@ -139,16 +147,6 @@ const buildFrequencyRule = (form: HabitFormState) => {
     kind: form.frequencyKind,
     importance: Math.min(100, Math.max(1, Number(form.importance) || 50))
   };
-};
-
-const isSchemaError = (message: string) => {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('schema cache') ||
-    lower.includes('does not exist') ||
-    lower.includes('column') ||
-    lower.includes('relation')
-  );
 };
 
 const completionSurfaceClass = (isComplete: boolean) =>
@@ -237,17 +235,13 @@ export default function HabitsClient() {
         .order('created_at', { ascending: true }),
       supabase
         .from('habit_templates')
-        .select(
-          'id,user_id,group_id,source_key,source_name,source_type,title,description,question,frequency_kind,frequency_rule,unit,target_type,target_value,color,sort_order,archived_at,created_at,updated_at'
-        )
+        .select(habitTemplateSelectFields)
         .eq('user_id', currentUser.id)
         .order('sort_order', { ascending: true })
         .order('created_at', { ascending: true }),
       supabase
         .from('habit_daily_records')
-        .select(
-          'id,user_id,template_id,record_date,value_text,value_number,completion_state,notes,source_type,source_key,raw_payload,created_at,updated_at'
-        )
+        .select(habitDailyRecordSelectFields)
         .eq('user_id', currentUser.id)
         .gte('record_date', recordStart)
         .order('record_date', { ascending: false })
@@ -265,9 +259,7 @@ export default function HabitsClient() {
     const templateResult = templateResultWithGroup.error && isSchemaError(templateResultWithGroup.error.message)
       ? await supabase
         .from('habit_templates')
-        .select(
-          'id,user_id,source_key,source_name,source_type,title,description,question,frequency_kind,frequency_rule,unit,target_type,target_value,color,sort_order,archived_at,created_at,updated_at'
-        )
+        .select(habitTemplateSelectFieldsLegacy)
         .eq('user_id', currentUser.id)
         .order('sort_order', { ascending: true })
         .order('created_at', { ascending: true })
@@ -286,16 +278,16 @@ export default function HabitsClient() {
     }
 
     const loadedTemplates = (templateResult.data ?? []).map((row) =>
-      normalizeHabitTemplateRow(row as Record<string, unknown>)
+      normalizeHabitTemplateRow(row as unknown as Record<string, unknown>)
     );
     const loadedRecords = (recordResult.data ?? []).map((row) =>
-      normalizeHabitRecordRow(row as Record<string, unknown>)
+      normalizeHabitRecordRow(row as unknown as Record<string, unknown>)
     );
     setTemplates(loadedTemplates);
     setRecords(loadedRecords);
     setRecordDrafts(buildInitialDrafts(loadedTemplates, loadedRecords, selectedDate));
     setEditingTemplateId(null);
-    setTemplateForm(createHabitForm());
+    setTemplateForm(createHabitForm(selectedDate));
     setLoading(false);
   };
 
@@ -434,16 +426,28 @@ export default function HabitsClient() {
     })
   ), [activeTemplates, groupIdsById, groups, selectedDate, selectedDateRecords]);
 
-  const selectedGroup = selectedGroupId
-    ? groups.find((group) => group.id === selectedGroupId) ?? null
-    : null;
-  const selectedGroupIds = selectedGroupId ? groupIdsById.get(selectedGroupId) ?? new Set([selectedGroupId]) : new Set<string>();
-  const selectedGroupTemplates = selectedGroup
-    ? activeTemplates.filter((template) => template.group_id && selectedGroupIds.has(template.group_id))
-    : [];
-  const selectedGroupStats = selectedGroupId
-    ? habitGroupStats.get(selectedGroupId) ?? { total: 0, done: 0, allTemplates: 0, completion: 0, score: 0 }
-    : { total: 0, done: 0, allTemplates: 0, completion: 0, score: 0 };
+  const selectedGroup = useMemo(
+    () => selectedGroupId
+      ? groups.find((group) => group.id === selectedGroupId) ?? null
+      : null,
+    [groups, selectedGroupId]
+  );
+  const selectedGroupIds = useMemo(
+    () => selectedGroupId ? groupIdsById.get(selectedGroupId) ?? new Set([selectedGroupId]) : new Set<string>(),
+    [groupIdsById, selectedGroupId]
+  );
+  const selectedGroupTemplates = useMemo(
+    () => selectedGroup
+      ? activeTemplates.filter((template) => template.group_id && selectedGroupIds.has(template.group_id))
+      : [],
+    [activeTemplates, selectedGroup, selectedGroupIds]
+  );
+  const selectedGroupStats = useMemo(
+    () => selectedGroupId
+      ? habitGroupStats.get(selectedGroupId) ?? { total: 0, done: 0, allTemplates: 0, completion: 0, score: 0 }
+      : { total: 0, done: 0, allTemplates: 0, completion: 0, score: 0 },
+    [habitGroupStats, selectedGroupId]
+  );
   const selectedGroupTimeline = useMemo(() => {
     if (!selectedGroup || selectedGroupTemplates.length === 0) {
       return [];
@@ -509,7 +513,7 @@ export default function HabitsClient() {
 
   const resetTemplateForm = () => {
     setEditingTemplateId(null);
-    setTemplateForm(createHabitForm());
+    setTemplateForm(createHabitForm(selectedDate));
     setHabitModalOpen(false);
   };
 
@@ -649,14 +653,15 @@ export default function HabitsClient() {
       source_type: 'manual',
       title: templateForm.title.trim(),
       description: templateForm.description.trim() || null,
-      question: null,
+      question: templateForm.question.trim() || null,
       frequency_kind: templateForm.frequencyKind === 'monthly' ? 'custom' : templateForm.frequencyKind,
       frequency_rule: buildFrequencyRule(templateForm),
       unit: templateForm.unitLabel.trim() || null,
-      target_type: templateForm.targetType === 'AT_MOST' ? 'AT_MOST' : 'AT_LEAST',
+      target_type: templateForm.targetType,
       target_value: templateForm.targetValue ? Number(templateForm.targetValue) : null,
       color: null,
       group_id: templateForm.groupId || null,
+      start_date: clampDateInput(templateForm.startDate, selectedDate),
       sort_order: currentTemplate?.sort_order ?? templates.length,
       archived_at: currentTemplate?.archived_at ?? null
     };
@@ -695,7 +700,7 @@ export default function HabitsClient() {
     setTemplateForm({
       title: template.title,
       description: template.description ?? '',
-      question: '',
+      question: template.question ?? '',
       frequencyKind:
         typeof rule === 'object' &&
         rule !== null &&
@@ -728,7 +733,8 @@ export default function HabitsClient() {
       targetValue: template.target_value !== null && template.target_value !== undefined ? String(template.target_value) : '',
       unitLabel: template.unit ?? '',
       color: '#2563eb',
-      groupId: template.group_id ?? ''
+      groupId: template.group_id ?? '',
+      startDate: template.start_date
     });
     setHabitModalOpen(true);
   };
@@ -818,16 +824,13 @@ export default function HabitsClient() {
     };
     const evaluation = evaluateHabitRecord(template, draftRecord, selectedDate);
     const completionState = evaluation.isDone ? 'done' : 'missed';
-    const normalizedValueNumber = isYesNoHabit(template)
-      ? evaluation.actualValue
-      : evaluation.actualValue;
 
     const payload = {
       user_id: user.id,
       template_id: template.id,
       record_date: selectedDate,
-      value_text: isYesNoHabit(template) || valueNumber !== null ? null : valueText,
-      value_number: normalizedValueNumber,
+      value_text: valueNumber !== null ? null : valueText,
+      value_number: evaluation.actualValue,
       completion_state: completionState,
       notes: draft.notes.trim() || null,
       source_type: 'manual',
@@ -1003,7 +1006,7 @@ export default function HabitsClient() {
               type='button'
               onClick={() => {
                 setEditingTemplateId(null);
-                setTemplateForm(createHabitForm());
+                setTemplateForm(createHabitForm(selectedDate));
                 setHabitModalOpen(true);
               }}
               className='rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white'
@@ -1158,6 +1161,21 @@ export default function HabitsClient() {
               />
             </label>
 
+            <label className='block md:col-span-2'>
+              <span className='mb-1 block text-sm font-medium text-slate-600'>问题</span>
+              <input
+                value={templateForm.question}
+                onChange={(event) =>
+                  setTemplateForm((previous) => ({
+                    ...previous,
+                    question: event.target.value
+                  }))
+                }
+                className='w-full rounded-2xl border border-slate-200 px-3 py-2.5'
+                placeholder='例如：今天早起了吗？'
+              />
+            </label>
+
             <label className='block'>
               <span className='mb-1 block text-sm font-medium text-slate-600'>频率类型</span>
               <select
@@ -1175,6 +1193,21 @@ export default function HabitsClient() {
                 <option value='weekly'>每周</option>
                 <option value='monthly'>每月</option>
               </select>
+            </label>
+
+            <label className='block'>
+              <span className='mb-1 block text-sm font-medium text-slate-600'>起始日期</span>
+              <input
+                value={templateForm.startDate}
+                onChange={(event) =>
+                  setTemplateForm((previous) => ({
+                    ...previous,
+                    startDate: event.target.value
+                  }))
+                }
+                type='date'
+                className='w-full rounded-2xl border border-slate-200 px-3 py-2.5'
+              />
             </label>
 
             <label className='block'>

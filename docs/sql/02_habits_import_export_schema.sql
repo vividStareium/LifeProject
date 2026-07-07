@@ -20,7 +20,7 @@ create table if not exists public.habit_templates (
   group_id uuid references public.habit_groups (id) on delete set null,
   source_key text not null,
   source_name text,
-  source_type text not null default 'manual' check (source_type in ('manual', 'csv', 'zip', 'export', 'loop_zip')),
+  source_type text not null default 'manual' check (source_type in ('manual', 'csv', 'zip', 'export')),
   title text not null check (char_length(trim(title)) > 0),
   description text,
   question text,
@@ -32,6 +32,7 @@ create table if not exists public.habit_templates (
   target_value numeric,
   color text,
   sort_order integer not null default 0,
+  start_date date not null default current_date,
   archived_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -39,6 +40,17 @@ create table if not exists public.habit_templates (
 
 alter table public.habit_templates
   add column if not exists group_id uuid references public.habit_groups (id) on delete set null;
+
+alter table public.habit_templates
+  add column if not exists start_date date;
+
+update public.habit_templates
+set start_date = coalesce(start_date, (created_at at time zone 'Asia/Shanghai')::date, current_date)
+where start_date is null;
+
+alter table public.habit_templates
+  alter column start_date set default current_date,
+  alter column start_date set not null;
 
 create index if not exists habit_groups_user_id_idx
   on public.habit_groups (user_id);
@@ -55,6 +67,9 @@ create index if not exists habit_templates_user_archived_sort_idx
 create index if not exists habit_templates_user_group_idx
   on public.habit_templates (user_id, group_id);
 
+create index if not exists habit_templates_user_start_date_idx
+  on public.habit_templates (user_id, start_date);
+
 create table if not exists public.habit_daily_records (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
@@ -67,7 +82,7 @@ create table if not exists public.habit_daily_records (
   completion_ratio numeric check (completion_ratio is null or (completion_ratio >= 0 and completion_ratio <= 1)),
   completion_state text not null default 'unknown' check (completion_state in ('done', 'missed', 'unknown', 'recorded')),
   notes text,
-  source_type text not null default 'manual' check (source_type in ('manual', 'csv', 'zip', 'export', 'loop_zip')),
+  source_type text not null default 'manual' check (source_type in ('manual', 'csv', 'zip', 'export')),
   source_key text,
   raw_payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),

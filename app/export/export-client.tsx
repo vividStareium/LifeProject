@@ -6,6 +6,7 @@ import type { User } from '@supabase/supabase-js';
 
 import { AppShell, Panel, StatCard } from '@/components/app-shell';
 import { buildDailySummaries } from '@/lib/analytics';
+import { habitDailyRecordSelectFields, habitTemplateSelectFields } from '@/lib/habit-db';
 import { buildExportJson, buildExportZip } from '@/lib/habit-io';
 import { supabase } from '@/lib/supabase/client';
 import { getBeijingDateInput } from '@/lib/date';
@@ -51,9 +52,9 @@ export default function ExportClient() {
     setUser(currentUser);
 
     const taskSelectWithImportance =
-      'id,user_id,title,description,task_date,start_time,end_time,status,priority,importance,category,created_at,updated_at,deleted_at';
+      'id,user_id,title,description,task_date,task_type,range_start_date,range_end_date,progress_value,target_value,start_time,end_time,status,priority,importance,category,created_at,updated_at,deleted_at';
     const taskSelectWithoutImportance =
-      'id,user_id,title,description,task_date,start_time,end_time,status,priority,category,created_at,updated_at,deleted_at';
+      'id,user_id,title,description,task_date,task_type,range_start_date,range_end_date,progress_value,target_value,start_time,end_time,status,priority,category,created_at,updated_at,deleted_at';
     const buildTaskQuery = (selectFields: string) => supabase
       .from('tasks')
       .select(selectFields)
@@ -64,17 +65,13 @@ export default function ExportClient() {
     const [templateResult, firstTaskResult, recordResult] = await Promise.all([
       supabase
         .from('habit_templates')
-        .select(
-          'id,user_id,source_key,source_name,source_type,title,description,question,frequency_kind,frequency_rule,unit,target_type,target_value,color,sort_order,archived_at,created_at,updated_at'
-        )
+        .select(habitTemplateSelectFields)
         .eq('user_id', currentUser.id)
         .order('sort_order', { ascending: true }),
       buildTaskQuery(taskSelectWithImportance),
       supabase
         .from('habit_daily_records')
-        .select(
-          'id,user_id,template_id,record_date,value_text,value_number,completion_state,notes,source_type,source_key,raw_payload,created_at,updated_at'
-        )
+        .select(habitDailyRecordSelectFields)
         .eq('user_id', currentUser.id)
         .order('record_date', { ascending: false })
         .order('created_at', { ascending: false })
@@ -101,9 +98,9 @@ export default function ExportClient() {
       return;
     }
 
-    setTemplates((templateResult.data ?? []).map((row) => normalizeHabitTemplateRow(row as Record<string, unknown>)));
+    setTemplates((templateResult.data ?? []).map((row) => normalizeHabitTemplateRow(row as unknown as Record<string, unknown>)));
     setTasks((taskResult.data ?? []) as unknown as HabitTaskLike[]);
-    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as Record<string, unknown>)));
+    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as unknown as Record<string, unknown>)));
     setLoading(false);
   };
 
@@ -149,7 +146,7 @@ export default function ExportClient() {
   return (
     <AppShell
       title='导出'
-      description='导出当前账号中的一次性任务、周期模板、周期记录以及热力图统计，ZIP 包内同时包含规范化 CSV 与 Loop 兼容文件。'
+      description='导出当前账号中的一次性任务、习惯模板、每日记录以及热力图统计。'
       activeHref='/export'
       onSignOut={async () => {
         await supabase.auth.signOut();
@@ -179,7 +176,7 @@ export default function ExportClient() {
                 {exportingZip ? '生成 ZIP 中…' : '下载 ZIP 备份'}
               </span>
               <span className='mt-1 block text-sm text-slate-200'>
-                含 CSV、JSON、Loop 兼容 legacy 文件，可再次导入。
+                含自有 CSV 与统计 JSON，可再次导入。
               </span>
             </button>
 
@@ -204,9 +201,8 @@ export default function ExportClient() {
               <li>`tasks.csv` - 一次性任务</li>
               <li>`habit-templates.csv` - 周期模板</li>
               <li>`habit-records.csv` - 每日记录，含实际值、归一化值、完成状态、完成度和分数</li>
-              <li>`habit-scores.csv` - 每日习惯分数表</li>
+              <li>`habit-scores.csv` - 每日习惯分数表，仅用于查看和校验</li>
               <li>`heatmap.json` / `summary.json` - 统计和可视化数据</li>
-              <li>`loop-habits-legacy/` - 兼容 Loop Habits 的 legacy CSV</li>
             </ul>
           </div>
         </Panel>
@@ -216,7 +212,7 @@ export default function ExportClient() {
             <div className='rounded-2xl border border-slate-100 bg-slate-50 p-4'>
               <p className='font-medium text-slate-900'>可再次导入</p>
               <p className='mt-1'>
-                ZIP 里包含规范化 CSV 与 legacy 兼容文件，导入页会自动识别并恢复模板、记录和任务。
+                ZIP 里包含本项目自有 CSV，导入页会自动识别并恢复模板、记录和任务。
               </p>
             </div>
             <div className='rounded-2xl border border-slate-100 bg-slate-50 p-4'>

@@ -1,6 +1,5 @@
 import type { HabitCompletionState, HabitTemplateRow } from '@/types/habit';
-import type { HabitTemplateDraft, HabitRecordDraft } from '@/types/import';
-import { normalizeHeader, parseNumberMaybe, safeTrim, slugify } from '@/lib/csv';
+import { parseNumberMaybe, safeTrim } from '@/lib/csv';
 import {
   eachDayOfRange,
   getBeijingDateInput,
@@ -52,10 +51,6 @@ export const completionStateLabel = (state: HabitCompletionState) => {
 export const normalizeTargetType = (value: string | null | undefined) => {
   const normalized = safeTrim(value)?.toUpperCase().replace(/\s+/g, '_') ?? '';
 
-  if (normalized === 'YES_NO' || normalized === 'BOOLEAN') {
-    return 'YES_NO';
-  }
-
   if (normalized === 'AT_MOST' || normalized === 'MAX' || normalized === 'LESS_THAN') {
     return 'AT_MOST';
   }
@@ -69,8 +64,6 @@ export const normalizeTargetType = (value: string | null | undefined) => {
 
 export const targetTypeLabel = (value: string | null | undefined) => {
   switch (normalizeTargetType(value)) {
-    case 'YES_NO':
-      return '是/否';
     case 'AT_MOST':
       return '不超过';
     case 'AT_LEAST':
@@ -78,20 +71,6 @@ export const targetTypeLabel = (value: string | null | undefined) => {
     default:
       return '自动判断';
   }
-};
-
-export const isYesNoHabit = (
-  habit: Pick<HabitTemplateRow, 'target_type' | 'frequency_rule'> | HabitTemplateDraft
-) => {
-  const targetType = 'target_type' in habit ? habit.target_type : habit.targetType;
-  const rule = 'frequency_rule' in habit ? habit.frequency_rule : habit.frequencyRule;
-  const legacyType =
-    rule && typeof rule === 'object' ? (rule as Record<string, unknown>).type : undefined;
-
-  return (
-    normalizeTargetType(targetType) === 'YES_NO' ||
-    normalizeTargetType(typeof legacyType === 'string' ? legacyType : null) === 'YES_NO'
-  );
 };
 
 export const normalizeScaledNumber = (value: number | null | undefined) => {
@@ -134,9 +113,15 @@ export const habitImportance = (template: Pick<HabitTemplateRow, 'frequency_rule
 };
 
 export const isHabitDueOnDate = (
-  template: Pick<HabitTemplateRow, 'frequency_kind' | 'frequency_rule' | 'archived_at'>,
+  template: Pick<HabitTemplateRow, 'frequency_kind' | 'frequency_rule' | 'archived_at'> &
+    Partial<Pick<HabitTemplateRow, 'start_date' | 'created_at'>>,
   dateInput: string
 ) => {
+  const startDate = template.start_date ?? template.created_at?.slice(0, 10);
+  if (startDate && dateInput < startDate) {
+    return false;
+  }
+
   if (template.archived_at && dateInput > template.archived_at.slice(0, 10)) {
     return false;
   }
@@ -195,14 +180,6 @@ export const resolveActualValue = (
     return 0;
   }
 
-  if (isYesNoHabit(template)) {
-    const stateValue = record.completion_state === 'done' ? 1 : 0;
-    const textState = normalizeCompletionState(record.value_text);
-    const textValue = textState === 'done' ? 1 : 0;
-    const numericValue = record.value_number !== null && record.value_number >= 1 ? 1 : 0;
-    return Math.max(stateValue, textValue, numericValue);
-  }
-
   const numericText = parseNumberMaybe(record.value_text ?? '');
   const actual = record.value_number ?? numericText ?? 0;
   return normalizeScaledNumber(actual) ?? 0;
@@ -233,20 +210,15 @@ export const evaluateHabitRecord = (
   } | null,
   referenceDate = getBeijingDateInput()
 ): HabitEvaluation => {
-  const targetType = isYesNoHabit(template)
-    ? 'YES_NO'
-    : normalizeTargetType(template.target_type) || 'AT_LEAST';
+  const targetType = normalizeTargetType(template.target_type) === 'AT_MOST' ? 'AT_MOST' : 'AT_LEAST';
   const targetValue = template.target_value ?? 1;
   const actualValue = resolveActualValue(template, record);
-  const normalizedValue = isYesNoHabit(template) ? actualValue : actualValue;
+  const normalizedValue = actualValue;
 
   let isDone = false;
   let completionRatio = 0;
 
-  if (targetType === 'YES_NO') {
-    isDone = actualValue === 1;
-    completionRatio = isDone ? 1 : 0;
-  } else if (targetType === 'AT_MOST') {
+  if (targetType === 'AT_MOST') {
     isDone = actualValue <= targetValue;
     if (targetValue <= 0) {
       completionRatio = isDone ? 1 : 0;
@@ -277,6 +249,7 @@ export const evaluateHabitRecord = (
 
 export type HabitScorePoint = {
   date: string;
+  isDue: boolean;
   record: {
     value_text: string | null;
     value_number: number | null;
@@ -305,21 +278,36 @@ export const buildHabitScoreSeries = (
     return [];
   }
 
+  const templateStart = parseDateInput(template.start_date ?? template.created_at?.slice(0, 10) ?? '');
+  const effectiveStart = templateStart && templateStart > start ? templateStart : start;
+
+  if (effectiveStart > end) {
+    return [];
+  }
+
   const recordByDate = new Map(records.map((record) => [record.record_date, record]));
   let previousScore = 0;
 
-  return eachDayOfRange(start, end).map((date) => {
+  return eachDayOfRange(effectiveStart, end).map((date) => {
     const dateInput = toDateInputValue(date);
     const record = recordByDate.get(dateInput) ?? null;
-    const evaluation = evaluateHabitRecord(template, record, endDate);
-    const score = calculateNextHabitScore(previousScore, evaluation.completionRatio);
+    const isDue = isHabitDueOnDate(template, dateInput);
+    const evaluation = evaluateHabitRecord(template, record, dateInput);
+    const effectiveCompletionRatio = isDue ? evaluation.completionRatio : 0;
+    const score = isDue
+      ? calculateNextHabitScore(previousScore, effectiveCompletionRatio)
+      : previousScore;
     previousScore = score;
 
     return {
       date: dateInput,
+      isDue,
       record,
       evaluation: {
         ...evaluation,
+        isDone: isDue && evaluation.isDone,
+        completionRatio: effectiveCompletionRatio,
+        dailyScore: Math.round(effectiveCompletionRatio * 100),
         score
       },
       score
@@ -327,117 +315,5 @@ export const buildHabitScoreSeries = (
   });
 };
 
-export const inferFrequencyKind = (row: Record<string, string>) => {
-  const numerator = parseNumberMaybe(row.FrequencyNumerator);
-  const denominator = parseNumberMaybe(row.FrequencyDenominator);
-  const type = normalizeHeader(row.Type ?? '').toUpperCase();
-
-  if (type.includes('WEEK')) {
-    return 'weekly' as const;
-  }
-
-  if (numerator === 1 && denominator === 1) {
-    return 'daily' as const;
-  }
-
-  if ((numerator && numerator > 1) || (denominator && denominator > 1)) {
-    return 'custom' as const;
-  }
-
-  return 'daily' as const;
-};
-
-export const buildLegacyFrequencyRule = (row: Record<string, string>) => {
-  const numerator = parseNumberMaybe(row.FrequencyNumerator);
-  const denominator = parseNumberMaybe(row.FrequencyDenominator);
-
-  return {
-    legacy: true,
-    numerator,
-    denominator,
-    type: safeTrim(row.Type)
-  };
-};
-
-export const buildTemplateSourceKey = (value: string) => value.trim() || `template-${slugify(value)}`;
-
-export const buildHabitTemplateDraft = (
-  row: Record<string, string>,
-  fallbackOrder: number,
-  sourceName: string,
-  sourceType: HabitTemplateDraft['sourceType']
-): HabitTemplateDraft => {
-  const title = safeTrim(row.Name) ?? `Habit ${fallbackOrder + 1}`;
-  const position = safeTrim(row.Position) ?? String(fallbackOrder + 1).padStart(3, '0');
-  const legacyType = safeTrim(row.Type);
-  const targetType = safeTrim(row['Target Type']) ?? (normalizeTargetType(legacyType) === 'YES_NO' ? 'YES_NO' : null);
-
-  return {
-    sourceKey: position,
-    sourceName,
-    sourceType,
-    sortOrder: fallbackOrder,
-    title,
-    description: safeTrim(row.Description),
-    question: safeTrim(row.Question),
-    frequencyKind: inferFrequencyKind(row),
-    frequencyRule: buildLegacyFrequencyRule(row),
-    unit: safeTrim(row.Unit),
-    targetType,
-    targetValue: parseNumberMaybe(row['Target Value']),
-    color: safeTrim(row.Color),
-    archivedAt: row['Archived?']?.toLowerCase() === 'true' ? new Date().toISOString() : null
-  };
-};
-
-export const mergeRecordDraft = (
-  draft: HabitRecordDraft,
-  existing?: HabitRecordDraft | null
-): HabitRecordDraft => {
-  if (!existing) {
-    return draft;
-  }
-
-  return {
-    ...existing,
-    valueText: draft.valueText ?? existing.valueText,
-    valueNumber: draft.valueNumber ?? existing.valueNumber,
-    completionState:
-      draft.completionState === 'unknown' && existing.completionState !== 'unknown'
-        ? existing.completionState
-        : draft.completionState,
-    notes: draft.notes ?? existing.notes,
-    rawPayload: {
-      ...existing.rawPayload,
-      ...draft.rawPayload
-    }
-  };
-};
-
 export const createRecordSourceKey = (templateSourceKey: string, recordDate: string) =>
   `${templateSourceKey}:${recordDate}`;
-
-export const buildTemplateLookupKeys = (value: string) => {
-  const cleaned = value.trim();
-  const stripped = cleaned.replace(/^\d+\s*[-_.:]?\s*/, '').trim();
-  return Array.from(
-    new Set(
-      [cleaned, cleaned.toLowerCase(), stripped, stripped.toLowerCase()].filter(Boolean)
-    )
-  );
-};
-
-export const resolveTemplateByName = (
-  templates: HabitTemplateDraft[],
-  value: string
-) => {
-  const candidates = buildTemplateLookupKeys(value);
-  return templates.find((template) =>
-    candidates.some(
-      (candidate) =>
-        template.title === candidate ||
-        template.title.toLowerCase() === candidate.toLowerCase() ||
-        template.sourceKey === candidate
-    )
-  );
-};

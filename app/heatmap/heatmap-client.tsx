@@ -20,6 +20,7 @@ import {
 } from '@/lib/analytics';
 import { addMonths, getBeijingDateInput, parseDateInput, toDateInputValue } from '@/lib/date';
 import { completionHeatmapStyle } from '@/lib/heatmap-color';
+import { habitDailyRecordSelectFields, habitTemplateSelectFields } from '@/lib/habit-db';
 import { formatHabitValue } from '@/lib/habit-domain';
 import { normalizeHabitRecordRow, normalizeHabitTemplateRow } from '@/lib/normalize-db-rows';
 import { supabase } from '@/lib/supabase/client';
@@ -190,17 +191,13 @@ export default function HeatmapClient() {
     const [templateResult, firstTaskResult, recordResult] = await Promise.all([
       supabase
         .from('habit_templates')
-        .select(
-          'id,user_id,source_key,source_name,source_type,title,description,question,frequency_kind,frequency_rule,unit,target_type,target_value,color,sort_order,archived_at,created_at,updated_at'
-        )
+        .select(habitTemplateSelectFields)
         .eq('user_id', currentUser.id)
         .order('sort_order', { ascending: true }),
       taskResultPromise,
       supabase
         .from('habit_daily_records')
-        .select(
-          'id,user_id,template_id,record_date,value_text,value_number,completion_state,notes,source_type,source_key,raw_payload,created_at,updated_at'
-        )
+        .select(habitDailyRecordSelectFields)
         .eq('user_id', currentUser.id)
         .gte('record_date', startDate)
         .lte('record_date', endDate)
@@ -233,9 +230,9 @@ export default function HeatmapClient() {
       return;
     }
 
-    setTemplates((templateResult.data ?? []).map((row) => normalizeHabitTemplateRow(row as Record<string, unknown>)));
+    setTemplates((templateResult.data ?? []).map((row) => normalizeHabitTemplateRow(row as unknown as Record<string, unknown>)));
     setTasks((taskResult.data ?? []) as unknown as HabitTaskLike[]);
-    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as Record<string, unknown>)));
+    setRecords((recordResult.data ?? []).map((row) => normalizeHabitRecordRow(row as unknown as Record<string, unknown>)));
     setLoading(false);
   };
 

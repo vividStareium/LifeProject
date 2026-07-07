@@ -1,10 +1,17 @@
 import { parseNumberMaybe } from '@/lib/csv';
+import { clampDateInput, getBeijingDateInput, isDateString } from '@/lib/date';
 import type { HabitDailyRecordRow, HabitTemplateRow } from '@/types/habit';
 
 type UnknownRow = Record<string, unknown>;
 
 export const normalizeHabitTemplateRow = (row: UnknownRow): HabitTemplateRow => ({
   ...(row as HabitTemplateRow),
+  start_date: isDateString(String(row.start_date ?? ''))
+    ? String(row.start_date)
+    : clampDateInput(
+      typeof row.created_at === 'string' ? row.created_at.slice(0, 10) : null,
+      getBeijingDateInput()
+    ),
   target_value:
     row.target_value === null || row.target_value === undefined
       ? null
@@ -18,4 +25,3 @@ export const normalizeHabitRecordRow = (row: UnknownRow): HabitDailyRecordRow =>
       ? null
       : parseNumberMaybe(String(row.value_number))
 });
-

@@ -2,7 +2,7 @@ export type FrequencyKind = 'daily' | 'weekly' | 'custom';
 
 export type HabitCompletionState = 'done' | 'missed' | 'unknown' | 'recorded';
 
-export type HabitSourceType = 'manual' | 'csv' | 'zip' | 'export' | 'loop_zip';
+export type HabitSourceType = 'manual' | 'csv' | 'zip' | 'export';
 
 export type HabitGroupRow = {
   id: string;
@@ -32,6 +32,7 @@ export type HabitTemplateRow = {
   target_value: number | null;
   color: string | null;
   sort_order: number;
+  start_date: string;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
