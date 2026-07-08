@@ -35,6 +35,7 @@ type HabitFormState = {
   color: string;
   groupId: string;
   startDate: string;
+  endDate: string;
 };
 
 type RecordDraftState = {
@@ -72,7 +73,8 @@ const createHabitForm = (startDate = getBeijingDateInput()): HabitFormState => (
   unitLabel: '',
   color: '#2563eb',
   groupId: '',
-  startDate
+  startDate,
+  endDate: ''
 });
 
 const createGroupForm = (): GroupFormState => ({
@@ -153,6 +155,9 @@ const completionSurfaceClass = (isComplete: boolean) =>
   isComplete
     ? 'border-emerald-200 bg-gradient-to-r from-emerald-100 via-white to-white'
     : 'border-slate-100 bg-slate-50';
+
+const isHabitEndedOnDate = (template: HabitTemplateRow, date: string) =>
+  Boolean(template.end_date && date > template.end_date);
 
 const omitKeys = <T extends Record<string, unknown>>(value: T, keys: string[]) => {
   const next = { ...value };
@@ -304,12 +309,16 @@ export default function HabitsClient() {
   }, [records, selectedDate, templates]);
 
   const activeTemplates = useMemo(
-    () => templates.filter((template) => !template.archived_at),
-    [templates]
+    () => templates.filter((template) => !template.archived_at && !isHabitEndedOnDate(template, selectedDate)),
+    [selectedDate, templates]
   );
   const archivedTemplates = useMemo(
     () => templates.filter((template) => Boolean(template.archived_at)),
     [templates]
+  );
+  const endedTemplates = useMemo(
+    () => templates.filter((template) => !template.archived_at && isHabitEndedOnDate(template, selectedDate)),
+    [selectedDate, templates]
   );
   const selectedDateRecords = useMemo(
     () => records.filter((record) => record.record_date === selectedDate),
@@ -338,12 +347,13 @@ export default function HabitsClient() {
       totalTemplates: templates.length,
       activeTemplates: activeTemplates.length,
       archivedTemplates: archivedTemplates.length,
+      endedTemplates: endedTemplates.length,
       recordsTotal: records.length,
       recordsToday: dueTemplates.length,
       completedToday,
       weightedCompletion
     };
-  }, [activeTemplates, archivedTemplates.length, records.length, selectedDate, selectedDateRecords, templates.length]);
+  }, [activeTemplates, archivedTemplates.length, endedTemplates.length, records.length, selectedDate, selectedDateRecords, templates.length]);
 
   const orderedGroups = useMemo(() => {
     const children = new Map<string, HabitGroupRow[]>();
@@ -638,6 +648,13 @@ export default function HabitsClient() {
       return;
     }
 
+    const startDate = clampDateInput(templateForm.startDate, selectedDate);
+    const endDate = templateForm.endDate.trim() ? clampDateInput(templateForm.endDate, '') : null;
+    if (endDate && endDate < startDate) {
+      setError('终止日期不能早于起始日期');
+      return;
+    }
+
     setSavingTemplate(true);
     setError('');
 
@@ -661,7 +678,8 @@ export default function HabitsClient() {
       target_value: templateForm.targetValue ? Number(templateForm.targetValue) : null,
       color: null,
       group_id: templateForm.groupId || null,
-      start_date: clampDateInput(templateForm.startDate, selectedDate),
+      start_date: startDate,
+      end_date: endDate,
       sort_order: currentTemplate?.sort_order ?? templates.length,
       archived_at: currentTemplate?.archived_at ?? null
     };
@@ -676,7 +694,7 @@ export default function HabitsClient() {
       setGroupsAvailable(false);
       templateSaveResult = await supabase
         .from('habit_templates')
-        .upsert(omitKeys(payload, ['group_id']), { onConflict: 'user_id,source_key' })
+        .upsert(omitKeys(payload, ['group_id', 'start_date', 'end_date']), { onConflict: 'user_id,source_key' })
         .select()
         .single();
     }
@@ -734,7 +752,8 @@ export default function HabitsClient() {
       unitLabel: template.unit ?? '',
       color: '#2563eb',
       groupId: template.group_id ?? '',
-      startDate: template.start_date
+      startDate: template.start_date,
+      endDate: template.end_date ?? ''
     });
     setHabitModalOpen(true);
   };
@@ -987,9 +1006,10 @@ export default function HabitsClient() {
         router.replace('/auth/login');
       }}
     >
-      <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-6'>
+      <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-7'>
         <StatCard label='模板总数' value={stats.totalTemplates} hint='包含已归档习惯' />
-        <StatCard label='活跃模板' value={stats.activeTemplates} hint='未归档的周期习惯' />
+        <StatCard label='活跃模板' value={stats.activeTemplates} hint='当前日期仍有效' />
+        <StatCard label='已终止' value={stats.endedTemplates} hint='保留历史记录' />
         <StatCard label='已归档' value={stats.archivedTemplates} hint='可随时恢复' />
         <StatCard label='记录总数' value={stats.recordsTotal} hint='最近 6 个月的每日记录' />
         <StatCard label='当天记录' value={stats.recordsToday} hint={`当前日期：${selectedDate}`} />
@@ -1061,16 +1081,21 @@ export default function HabitsClient() {
         <div className='grid gap-2 sm:grid-cols-2 xl:grid-cols-3'>
           {templates.map((template) => {
             const isArchived = Boolean(template.archived_at);
+            const isEnded = isHabitEndedOnDate(template, selectedDate);
             const existingRecord = selectedDateRecords.find((record) => record.template_id === template.id);
             const evaluation = evaluateHabitRecord(template, existingRecord, selectedDate);
             const isComplete = evaluation.isDone;
             return (
-              <div key={template.id} className={`rounded-xl border px-3 py-2 ${isArchived ? 'border-slate-200 bg-slate-50' : completionSurfaceClass(isComplete)}`}>
+              <div key={template.id} className={`rounded-xl border px-3 py-2 ${isArchived || isEnded ? 'border-slate-200 bg-slate-50' : completionSurfaceClass(isComplete)}`}>
                 <div className='flex items-center justify-between gap-2'>
                   <Link href={`/habits/${template.id}`} className='min-w-0 flex-1'>
-                    <p className='truncate text-sm font-semibold text-slate-900'>{template.title}</p>
+                    <p className='truncate text-sm font-semibold text-slate-900'>
+                      {template.title}
+                      {isEnded && !isArchived ? <span className='ml-2 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-600'>已终止</span> : null}
+                    </p>
                     <p className='truncate text-xs text-slate-500'>
                       {frequencyBadgeLabel(template)} · 值 {formatHabitValue(evaluation.actualValue)} · 完成度 {evaluation.completionRatio}
+                      {template.end_date ? ` · 至 ${template.end_date}` : ''}
                       {template.group_id && groupNameById.get(template.group_id) ? ` · ${groupNameById.get(template.group_id)}` : ''}
                     </p>
                   </Link>
@@ -1203,6 +1228,21 @@ export default function HabitsClient() {
                   setTemplateForm((previous) => ({
                     ...previous,
                     startDate: event.target.value
+                  }))
+                }
+                type='date'
+                className='w-full rounded-2xl border border-slate-200 px-3 py-2.5'
+              />
+            </label>
+
+            <label className='block'>
+              <span className='mb-1 block text-sm font-medium text-slate-600'>终止日期</span>
+              <input
+                value={templateForm.endDate}
+                onChange={(event) =>
+                  setTemplateForm((previous) => ({
+                    ...previous,
+                    endDate: event.target.value
                   }))
                 }
                 type='date'

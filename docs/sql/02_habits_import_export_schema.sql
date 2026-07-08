@@ -33,6 +33,7 @@ create table if not exists public.habit_templates (
   color text,
   sort_order integer not null default 0,
   start_date date not null default current_date,
+  end_date date,
   archived_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -52,6 +53,23 @@ alter table public.habit_templates
   alter column start_date set default current_date,
   alter column start_date set not null;
 
+alter table public.habit_templates
+  add column if not exists end_date date;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'habit_templates_date_range'
+  ) then
+    alter table public.habit_templates
+      add constraint habit_templates_date_range
+      check (end_date is null or start_date <= end_date);
+  end if;
+end;
+$$;
+
 create index if not exists habit_groups_user_id_idx
   on public.habit_groups (user_id);
 
@@ -69,6 +87,9 @@ create index if not exists habit_templates_user_group_idx
 
 create index if not exists habit_templates_user_start_date_idx
   on public.habit_templates (user_id, start_date);
+
+create index if not exists habit_templates_user_end_date_idx
+  on public.habit_templates (user_id, end_date);
 
 create table if not exists public.habit_daily_records (
   id uuid primary key default gen_random_uuid(),

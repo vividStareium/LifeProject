@@ -114,11 +114,15 @@ export const habitImportance = (template: Pick<HabitTemplateRow, 'frequency_rule
 
 export const isHabitDueOnDate = (
   template: Pick<HabitTemplateRow, 'frequency_kind' | 'frequency_rule' | 'archived_at'> &
-    Partial<Pick<HabitTemplateRow, 'start_date' | 'created_at'>>,
+    Partial<Pick<HabitTemplateRow, 'start_date' | 'end_date' | 'created_at'>>,
   dateInput: string
 ) => {
   const startDate = template.start_date ?? template.created_at?.slice(0, 10);
   if (startDate && dateInput < startDate) {
+    return false;
+  }
+
+  if (template.end_date && dateInput > template.end_date) {
     return false;
   }
 
@@ -280,15 +284,17 @@ export const buildHabitScoreSeries = (
 
   const templateStart = parseDateInput(template.start_date ?? template.created_at?.slice(0, 10) ?? '');
   const effectiveStart = templateStart && templateStart > start ? templateStart : start;
+  const templateEnd = parseDateInput(template.end_date ?? '');
+  const effectiveEnd = templateEnd && templateEnd < end ? templateEnd : end;
 
-  if (effectiveStart > end) {
+  if (effectiveStart > effectiveEnd) {
     return [];
   }
 
   const recordByDate = new Map(records.map((record) => [record.record_date, record]));
   let previousScore = 0;
 
-  return eachDayOfRange(effectiveStart, end).map((date) => {
+  return eachDayOfRange(effectiveStart, effectiveEnd).map((date) => {
     const dateInput = toDateInputValue(date);
     const record = recordByDate.get(dateInput) ?? null;
     const isDue = isHabitDueOnDate(template, dateInput);

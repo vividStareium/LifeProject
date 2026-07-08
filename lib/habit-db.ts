@@ -16,6 +16,7 @@ const habitTemplateFields = [
   'color',
   'sort_order',
   'start_date',
+  'end_date',
   'archived_at',
   'created_at',
   'updated_at'
@@ -28,7 +29,7 @@ export const habitTemplateSelectFieldsWithoutGroup = habitTemplateFields
   .join(',');
 
 export const habitTemplateSelectFieldsLegacy = habitTemplateFields
-  .filter((field) => field !== 'group_id' && field !== 'start_date')
+  .filter((field) => field !== 'group_id' && field !== 'start_date' && field !== 'end_date')
   .join(',');
 
 export const habitDailyRecordSelectFields = [

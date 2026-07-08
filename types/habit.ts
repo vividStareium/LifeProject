@@ -33,6 +33,7 @@ export type HabitTemplateRow = {
   color: string | null;
   sort_order: number;
   start_date: string;
+  end_date: string | null;
   archived_at: string | null;
   created_at: string;
   updated_at: string;

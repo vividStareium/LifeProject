@@ -272,6 +272,14 @@ const parseHabitTemplateDrafts = (file: ParsedCsvFile) => {
     const sourceKey = safeTrim(getRowValue(data, ['source_key', 'source key'])) ?? `template-${index + 1}`;
     const title = safeTrim(getRowValue(data, ['title', 'name'])) ?? sourceKey;
     const startDate = safeTrim(getRowValue(data, ['start_date', 'start date']));
+    const endDate = safeTrim(getRowValue(data, ['end_date', 'end date']));
+    const startDateValue = startDate && isDateCell(startDate) ? startDate : null;
+    let endDateValue = endDate && isDateCell(endDate) ? endDate : null;
+
+    if (startDateValue && endDateValue && endDateValue < startDateValue) {
+      warnings.push(`模板文件 ${file.path} 第 ${index + 2} 行终止日期早于起始日期，已忽略终止日期。`);
+      endDateValue = null;
+    }
 
     drafts.push({
       sourceKey,
@@ -287,7 +295,8 @@ const parseHabitTemplateDrafts = (file: ParsedCsvFile) => {
       targetType: normalizeTargetType(getRowValue(data, ['target_type', 'target type'])),
       targetValue: parseNumberMaybe(getRowValue(data, ['target_value', 'target value'])),
       color: safeTrim(getRowValue(data, ['color'])),
-      startDate: startDate && isDateCell(startDate) ? startDate : null,
+      startDate: startDateValue,
+      endDate: endDateValue,
       archivedAt: safeTrim(getRowValue(data, ['archived_at', 'archived at']))
     });
   }
@@ -388,7 +397,8 @@ const normalizeTemplateDrafts = (drafts: HabitTemplateDraft[]) => {
         ...existing.frequencyRule,
         ...draft.frequencyRule
       },
-      startDate: draft.startDate ?? existing.startDate
+      startDate: draft.startDate ?? existing.startDate,
+      endDate: draft.endDate ?? existing.endDate
     });
   }
 
@@ -450,10 +460,14 @@ const buildPreviewFromFiles = (
     }
   }
 
-  const templatesWithStartDates = normalizedTemplates.map((template) => ({
-    ...template,
-    startDate: template.startDate ?? firstRecordDateByTemplateKey.get(template.sourceKey) ?? getBeijingDateInput()
-  }));
+  const templatesWithStartDates = normalizedTemplates.map((template) => {
+    const startDate = template.startDate ?? firstRecordDateByTemplateKey.get(template.sourceKey) ?? getBeijingDateInput();
+    return {
+      ...template,
+      startDate,
+      endDate: template.endDate && template.endDate < startDate ? null : template.endDate
+    };
+  });
 
   return {
     fileName,
@@ -532,7 +546,8 @@ const createImportJobItems = (
         entity: 'habit_template',
         source_key: draft.sourceKey,
         title: draft.title,
-        start_date: draft.startDate
+        start_date: draft.startDate,
+        end_date: draft.endDate
       },
       status: 'ok',
       error_message: null
@@ -704,6 +719,7 @@ export const commitImportPreview = async (
       color: draft.color,
       sort_order: draft.sortOrder,
       start_date: draft.startDate ?? getBeijingDateInput(),
+      end_date: draft.endDate,
       archived_at: draft.archivedAt
     }));
 
@@ -867,6 +883,7 @@ const exportTemplateRows = (templates: HabitTemplateRow[]) =>
     color: template.color ?? '',
     sort_order: template.sort_order,
     start_date: template.start_date,
+    end_date: template.end_date ?? '',
     archived_at: template.archived_at ?? '',
     source_name: template.source_name ?? '',
     source_type: template.source_type
@@ -1053,6 +1070,7 @@ export const buildExportZip = async (input: ExportBundleInput) => {
         'color',
         'sort_order',
         'start_date',
+        'end_date',
         'archived_at',
         'source_name',
         'source_type'

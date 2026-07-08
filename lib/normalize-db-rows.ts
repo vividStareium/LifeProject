@@ -12,6 +12,7 @@ export const normalizeHabitTemplateRow = (row: UnknownRow): HabitTemplateRow => 
       typeof row.created_at === 'string' ? row.created_at.slice(0, 10) : null,
       getBeijingDateInput()
     ),
+  end_date: isDateString(String(row.end_date ?? '')) ? String(row.end_date) : null,
   target_value:
     row.target_value === null || row.target_value === undefined
       ? null

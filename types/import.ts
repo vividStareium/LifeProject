@@ -34,6 +34,7 @@ export type HabitTemplateDraft = {
   targetValue: number | null;
   color: string | null;
   startDate: string | null;
+  endDate: string | null;
   archivedAt: string | null;
 };
 

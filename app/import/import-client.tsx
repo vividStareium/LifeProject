@@ -218,7 +218,7 @@ export default function ImportClient() {
           <div className='rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-5 text-sm text-slate-600'>
             <p className='font-medium text-slate-900'>支持的 CSV</p>
             <ol className='mt-2 list-decimal space-y-1 pl-5'>
-              <li>`habit-templates.csv`：习惯模板，含起始日期、频率和目标。</li>
+              <li>`habit-templates.csv`：习惯模板，含起始日期、终止日期、频率和目标。</li>
               <li>`habit-records.csv`：每日记录，通过 `template_source_key` 匹配模板。</li>
               <li>`tasks.csv`：一次性任务。导出 ZIP 可直接再次导入。</li>
             </ol>
@@ -296,7 +296,7 @@ export default function ImportClient() {
                       <p className='font-medium text-slate-900'>{file.name}</p>
                       {file.kind === 'habit_templates' && (
                         <p className='mt-1'>
-                          {'source_key / title / frequency_rule / target_value / start_date 会写入习惯模板表。'}
+                          {'source_key / title / frequency_rule / target_value / start_date / end_date 会写入习惯模板表。'}
                         </p>
                       )}
                       {file.kind === 'tasks' && (

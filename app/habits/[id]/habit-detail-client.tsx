@@ -277,6 +277,28 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
     await loadData();
   };
 
+  const toggleTerminate = async () => {
+    if (!user || !template) {
+      return;
+    }
+
+    const today = getBeijingDateInput();
+    const nextEndDate = template.end_date ? null : today < template.start_date ? template.start_date : today;
+    const { error: terminateError } = await supabase
+      .from('habit_templates')
+      .update({ end_date: nextEndDate })
+      .eq('id', template.id)
+      .eq('user_id', user.id);
+
+    if (terminateError) {
+      setError('更新终止日期失败。');
+      return;
+    }
+
+    setMessage(nextEndDate ? '已终止习惯，历史记录会继续保留' : '已恢复为长期习惯');
+    await loadData();
+  };
+
   const deleteHabit = async () => {
     if (!user || !template) {
       return;
@@ -328,6 +350,9 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
           <button type='button' onClick={toggleArchive} className='rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700'>
             {template?.archived_at ? '恢复' : '归档'}
           </button>
+          <button type='button' onClick={toggleTerminate} className='rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700'>
+            {template?.end_date ? '恢复终止' : '终止'}
+          </button>
           <button type='button' onClick={deleteHabit} className='rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700'>
             删除
           </button>
@@ -358,7 +383,8 @@ export default function HabitDetailClient({ habitId }: HabitDetailClientProps) {
               <p>单位：{template.unit ?? '未填写'}</p>
               <p>目标类型：{targetTypeLabel(template.target_type)}</p>
               <p>起始日期：{template.start_date}</p>
-              <p>状态：{template.archived_at ? '已归档' : '活跃'}</p>
+              <p>终止日期：{template.end_date ?? '长期有效'}</p>
+              <p>状态：{template.archived_at ? '已归档' : template.end_date && getBeijingDateInput() > template.end_date ? '已终止' : '活跃'}</p>
               <p className='md:col-span-2'>说明：{template.description ?? '未填写'}</p>
             </div>
           </Panel>
