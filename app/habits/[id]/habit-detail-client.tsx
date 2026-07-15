@@ -89,16 +89,19 @@ function ValueBarChart({ values, unit }: ValueBarChartProps) {
         )}
       </div>
       <div className='overflow-x-auto rounded-2xl border border-slate-100 bg-slate-50 p-3'>
-        <div className='flex h-56 min-w-[720px] items-end gap-1'>
+        <div className='flex h-56 min-w-[720px] gap-1'>
           {values.map((item) => {
-            const height = Math.max(2, (Math.max(0, item.value) / maxValue) * 100);
+            const normalizedValue = Math.max(0, item.value);
+            const height = normalizedValue === 0 ? 0 : Math.max(2, (normalizedValue / maxValue) * 100);
             return (
-              <div key={item.date} className='flex min-w-4 flex-1 flex-col items-center justify-end gap-2'>
-                <div
-                  title={`${item.date}：${formatHabitValue(item.value)}${unit ? ` ${unit}` : ''}`}
-                  className='w-full rounded-t bg-sky-500 transition hover:bg-sky-600'
-                  style={{ height: `${height}%` }}
-                />
+              <div key={item.date} className='flex min-w-4 flex-1 flex-col items-center gap-2'>
+                <div className='flex h-48 w-full items-end'>
+                  <div
+                    title={`${item.date}：${formatHabitValue(item.value)}${unit ? ` ${unit}` : ''}`}
+                    className='w-full rounded-t bg-sky-500 transition hover:bg-sky-600'
+                    style={{ height: `${height}%` }}
+                  />
+                </div>
                 <span className='max-w-14 truncate text-[10px] text-slate-500'>{item.date}</span>
               </div>
             );
