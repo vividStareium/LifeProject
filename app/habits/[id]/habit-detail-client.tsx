@@ -94,13 +94,17 @@ function ValueBarChart({ values, unit }: ValueBarChartProps) {
             const normalizedValue = Math.max(0, item.value);
             const height = normalizedValue === 0 ? 0 : Math.max(2, (normalizedValue / maxValue) * 100);
             return (
-              <div key={item.date} className='flex min-w-4 flex-1 flex-col items-center gap-2'>
-                <div className='flex h-48 w-full items-end'>
+              <div key={item.date} className='flex min-w-12 flex-1 flex-col items-center gap-2'>
+                <div className='flex h-48 w-full items-end pt-4'>
                   <div
                     title={`${item.date}：${formatHabitValue(item.value)}${unit ? ` ${unit}` : ''}`}
-                    className='w-full rounded-t bg-sky-500 transition hover:bg-sky-600'
+                    className='relative w-full rounded-t bg-sky-500 transition hover:bg-sky-600'
                     style={{ height: `${height}%` }}
-                  />
+                  >
+                    <span className='pointer-events-none absolute -top-4 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-medium leading-none text-slate-600'>
+                      {formatHabitValue(item.value)}
+                    </span>
+                  </div>
                 </div>
                 <span className='max-w-14 truncate text-[10px] text-slate-500'>{item.date}</span>
               </div>
