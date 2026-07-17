@@ -1,4 +1,4 @@
-import type { HabitCompletionState, HabitTemplateRow } from '@/types/habit';
+import type { HabitCompletionState, HabitSourceType, HabitTemplateRow } from '@/types/habit';
 import { parseNumberMaybe, safeTrim } from '@/lib/csv';
 import {
   eachDayOfRange,
@@ -178,6 +178,7 @@ export const resolveActualValue = (
     value_text: string | null;
     value_number: number | null;
     completion_state: HabitCompletionState;
+    source_type?: HabitSourceType;
   } | null
 ) => {
   if (!record) {
@@ -186,7 +187,9 @@ export const resolveActualValue = (
 
   const numericText = parseNumberMaybe(record.value_text ?? '');
   const actual = record.value_number ?? numericText ?? 0;
-  return normalizeScaledNumber(actual) ?? 0;
+  return record.source_type && record.source_type !== 'manual'
+    ? normalizeScaledNumber(actual) ?? 0
+    : actual;
 };
 
 export type HabitEvaluation = {
@@ -210,6 +213,7 @@ export const evaluateHabitRecord = (
     value_text: string | null;
     value_number: number | null;
     completion_state: HabitCompletionState;
+    source_type?: HabitSourceType;
     record_date?: string;
   } | null,
   referenceDate = getBeijingDateInput()
@@ -258,6 +262,7 @@ export type HabitScorePoint = {
     value_text: string | null;
     value_number: number | null;
     completion_state: HabitCompletionState;
+    source_type?: HabitSourceType;
     record_date?: string;
   } | null;
   evaluation: HabitEvaluation;
@@ -270,6 +275,7 @@ export const buildHabitScoreSeries = (
     value_text: string | null;
     value_number: number | null;
     completion_state: HabitCompletionState;
+    source_type?: HabitSourceType;
     record_date: string;
   }>,
   startDate: string,
